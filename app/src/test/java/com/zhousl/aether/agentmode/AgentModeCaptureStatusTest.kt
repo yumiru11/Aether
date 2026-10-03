@@ -39,6 +39,19 @@ class AgentModeCaptureStatusTest {
     }
 
     @Test
+    fun unframedBlankFrameExplainsItself() {
+        // Issue #103: a launch can succeed and still not have drawn a frame by the capture deadline.
+        val outcome = parseAgentModeCaptureOutcome(
+            agentModeCaptureStatus(
+                source = AgentModeCaptureSourceBlank,
+                blankReason = AgentModeBlankReasonNoFrameYet,
+            ),
+        )
+        assertTrue(outcome.isBlank)
+        assertEquals(AgentModeBlankReasonNoFrameYet, outcome.blankReason)
+    }
+
+    @Test
     fun blankFrameWithoutReasonFallsBackToEmptyDisplay() {
         val outcome = parseAgentModeCaptureOutcome("""{"source":"blank"}""")
         assertTrue(outcome.isBlank)

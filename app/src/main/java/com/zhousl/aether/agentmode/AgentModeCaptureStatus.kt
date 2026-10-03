@@ -13,6 +13,7 @@ internal const val AgentModeCaptureSourceDisplay = "display"
 internal const val AgentModeCaptureSourceBlank = "blank"
 internal const val AgentModeBlankReasonLaunchFailed = "launch_failed"
 internal const val AgentModeBlankReasonNoLaunchedContent = "no_launched_content"
+internal const val AgentModeBlankReasonNoFrameYet = "no_frame_yet"
 internal const val AgentModeBlankReasonEmptyDisplay = "empty_display"
 
 internal data class AgentModeCaptureOutcome(

@@ -177,7 +177,6 @@ class AetherAgentModeShizukuService @Keep constructor(
     }
 
     override fun launchPackage(packageName: String, displayId: Int, userId: Int) {
-        warnIfCallerUserDiffers(userId)
         try {
             launchPackageInUser(packageName, displayId, userId)
         } catch (throwable: Throwable) {
@@ -231,6 +230,12 @@ class AetherAgentModeShizukuService @Keep constructor(
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            return PendingIntent.getActivity(context, intent.hashCode(), intent, flags)
+        }
+        // Before Android 9 the public overload stamps the *process* user, which is correct for the user
+        // this service process lives in (the owner user — the behaviour Agent Mode had before
+        // cross-user support). Any other user needs the hidden overload.
+        if (userId == agentModeUserIdFromUid(Process.myUid())) {
             return PendingIntent.getActivity(context, intent.hashCode(), intent, flags)
         }
         val userHandle = runCatching {
@@ -367,6 +372,10 @@ class AetherAgentModeShizukuService @Keep constructor(
     private fun pasteText(displayId: Int, text: String, userId: Int) {
         // The clipboard is per user, so a paste into an app that belongs to another user needs that
         // user's clipboard, not the user service's one.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && userId != 0) {
+            error("Agent Mode cannot paste text as user " + userId + " on Android " + Build.VERSION.RELEASE +
+                ": per-user clipboard requires Android 10 (API 29); refusing to write into the owner user's clipboard.")
+        }
         clipboardManagerFor(userId).setPrimaryClip(ClipData.newPlainText("Aether Agent Mode", text))
         val downTime = SystemClock.uptimeMillis()
         injectKeyEvent(
@@ -407,50 +416,40 @@ class AetherAgentModeShizukuService @Keep constructor(
             display.setSurface(reader.surface)
             try {
                 val image = awaitLatestImage(reader)
-                ParcelFileDescriptor.AutoCloseOutputStream(output).use { stream ->
-                    when {
-                        image != null -> {
-                            try {
-                                imageToJpegStream(
-                                    image = image,
-                                    output = stream,
-                                    maxEdge = boundedMaxEdge,
-                                    quality = boundedQuality,
-                                )
-                            } finally {
-                                image.close()
-                            }
-                        }
-
-                        displaysWithFailedLaunch.contains(displayId) -> {
-                            blankImageToJpegStream(
-                                width = reader.width,
-                                height = reader.height,
+                if (image == null) {
+                    // A launch that succeeded can still take longer than the capture deadline to draw
+                    // its first frame. A placeholder with a reason keeps that capture usable instead
+                    // of failing it outright.
+                    val blankReason = when {
+                        displaysWithFailedLaunch.contains(displayId) -> AgentModeBlankReasonLaunchFailed
+                        !displaysWithLaunchedContent.contains(displayId) -> AgentModeBlankReasonNoLaunchedContent
+                        else -> AgentModeBlankReasonNoFrameYet
+                    }
+                    ParcelFileDescriptor.AutoCloseOutputStream(output).use { stream ->
+                        blankImageToJpegStream(
+                            width = reader.width,
+                            height = reader.height,
+                            output = stream,
+                            maxEdge = boundedMaxEdge,
+                            quality = boundedQuality,
+                        )
+                    }
+                    status = agentModeCaptureStatus(
+                        source = AgentModeCaptureSourceBlank,
+                        blankReason = blankReason,
+                    )
+                } else {
+                    ParcelFileDescriptor.AutoCloseOutputStream(output).use { stream ->
+                        try {
+                            imageToJpegStream(
+                                image = image,
                                 output = stream,
                                 maxEdge = boundedMaxEdge,
                                 quality = boundedQuality,
                             )
-                            status = agentModeCaptureStatus(
-                                source = AgentModeCaptureSourceBlank,
-                                blankReason = AgentModeBlankReasonLaunchFailed,
-                            )
+                        } finally {
+                            image.close()
                         }
-
-                        !displaysWithLaunchedContent.contains(displayId) -> {
-                            blankImageToJpegStream(
-                                width = reader.width,
-                                height = reader.height,
-                                output = stream,
-                                maxEdge = boundedMaxEdge,
-                                quality = boundedQuality,
-                            )
-                            status = agentModeCaptureStatus(
-                                source = AgentModeCaptureSourceBlank,
-                                blankReason = AgentModeBlankReasonNoLaunchedContent,
-                            )
-                        }
-
-                        else -> error("Timed out while capturing display $displayId.")
                     }
                 }
             } finally {
@@ -588,7 +587,6 @@ class AetherAgentModeShizukuService @Keep constructor(
 
     @Suppress("DEPRECATION")
     override fun listInstalledAppsJson(userId: Int): String {
-        warnIfCallerUserDiffers(userId)
         val packageManager = contextForUser(userId).packageManager
         val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val launchables = packageManager.queryIntentActivities(
@@ -628,7 +626,11 @@ class AetherAgentModeShizukuService @Keep constructor(
 
     /** Builds (and caches) the context that acts on [userId] instead of on the service's user. */
     private fun contextForUser(userId: Int): Context {
-        require(userId >= 0) { "Agent Mode received an invalid user id ($userId)." }
+        // The upper bound matters as much as the lower one: a larger user id overflows
+        // `userId * AgentModePerUserUidRange`, and the wrapped-around value aliases the request back
+        // to the owner user.
+        require(userId in 0..AgentModeMaxUserId) { "Agent Mode received an invalid user id ($userId)." }
+        warnIfCallerUserDiffers(userId)
         return userContexts.computeIfAbsent(userId) { targetUserId ->
             createUserScopedContext(privilegedContext, targetUserId)
                 ?: error(
@@ -651,8 +653,10 @@ class AetherAgentModeShizukuService @Keep constructor(
     private fun createUserScopedContext(baseContext: Context, userId: Int): Context? {
         val userHandle = runCatching {
             UserHandle.getUserHandleForUid(userId * AgentModePerUserUidRange)
+        }.onFailure {
+            Log.w(AgentModeLogTag, "Agent Mode could not resolve user $userId to a user handle.", it)
         }.getOrNull() ?: return null
-        runCatching {
+        val packageContext = runCatching {
             Context::class.java
                 .getMethod(
                     "createPackageContextAsUser",
@@ -661,23 +665,54 @@ class AetherAgentModeShizukuService @Keep constructor(
                     UserHandle::class.java,
                 )
                 .invoke(baseContext, SystemPackageName, Context.CONTEXT_IGNORE_SECURITY, userHandle) as Context
-        }.getOrNull()?.let { userContext ->
-            Log.i(AgentModeLogTag, "Agent Mode user service scoped to user $userId")
-            return userContext
-        }
-        return runCatching {
+        }.onFailure {
+            Log.w(AgentModeLogTag, "createPackageContextAsUser failed for user $userId.", it)
+        }.getOrNull()
+        validatedUserScopedContext("createPackageContextAsUser", packageContext, userId)?.let { return it }
+        val genericContext = runCatching {
             Context::class.java
                 .getMethod("createContextAsUser", UserHandle::class.java, Int::class.javaPrimitiveType)
                 .invoke(baseContext, userHandle, 0) as Context
-        }.getOrNull()?.also {
-            Log.i(AgentModeLogTag, "Agent Mode user service scoped to user $userId")
+        }.onFailure {
+            Log.w(AgentModeLogTag, "createContextAsUser failed for user $userId.", it)
+        }.getOrNull()
+        return validatedUserScopedContext("createContextAsUser", genericContext, userId)
+    }
+
+    /**
+     * A hidden factory is free to return a context that belongs to another user, and such a context
+     * would silently act on the wrong user. Every strategy therefore has to prove the user it
+     * returned; a mismatch is logged and dropped instead of being cached and used, and the caller
+     * fails loudly when no strategy produces a context for the requested user.
+     */
+    private fun validatedUserScopedContext(strategy: String, candidateContext: Context?, userId: Int): Context? {
+        val candidate = candidateContext ?: return null
+        // Context.getUserId() is hidden API and absent from the compile SDK, so it is reflected in
+        // like the factories above. This process is not a regular app process, so the runtime does
+        // not restrict hidden API access; if the user can still not be read, the candidate is
+        // dropped instead of being trusted.
+        val actualUserId = runCatching {
+            Context::class.java.getMethod("getUserId").invoke(candidate) as Int
+        }.onFailure {
+            Log.w(AgentModeLogTag, "Agent Mode could not read the user of the context from $strategy.", it)
+        }.getOrNull() ?: return null
+        if (actualUserId != userId) {
+            Log.w(
+                AgentModeLogTag,
+                "Agent Mode $strategy returned a context for user $actualUserId instead of user $userId.",
+            )
+            return null
         }
+        Log.i(AgentModeLogTag, "Agent Mode user service scoped to user $userId")
+        return candidate
     }
 
     /**
      * The service binder lives in this process, so a call from Aether reports Aether's own uid as the
      * caller. A different user means the caller is not the app whose user we were asked to act on;
      * that is worth a log line, but the explicit [userId] still wins because it came from Aether.
+     *
+     * Called from [contextForUser] so every user-scoped call is guarded exactly once.
      */
     private fun warnIfCallerUserDiffers(userId: Int) {
         val callerUserId = runCatching {

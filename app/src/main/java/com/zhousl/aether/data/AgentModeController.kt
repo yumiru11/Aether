@@ -57,7 +57,9 @@ private const val ShizukuUserServiceBindTimeoutMillis = 20_000L
 private const val ShizukuUserServiceTag = "aether-agent-mode"
 // Bumped whenever the service AIDL or its user scoping changes: Shizuku reuses a running user
 // service until this version differs, and an old process would keep acting on the owner user.
-private const val ShizukuUserServiceVersion = 3
+// The user service runs under the shell uid, so an app upgrade does not restart it either; this
+// bump is what makes the new user scoping take effect on the next Shizuku-backed start.
+private const val ShizukuUserServiceVersion = 4
 
 private val ShizukuManagerPackages = listOf(
     "moe.shizuku.privileged.api",
