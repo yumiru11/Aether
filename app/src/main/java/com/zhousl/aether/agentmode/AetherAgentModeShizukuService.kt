@@ -17,10 +17,12 @@ import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.os.SystemClock
+import android.os.UserHandle
 import android.view.InputDevice
 import android.view.InputEvent
 import android.view.KeyCharacterMap
@@ -51,6 +53,44 @@ private const val TextInputMethodKeyEvents = "key_events"
 private const val TextInputMethodClipboardPaste = "clipboard_paste"
 private const val SystemPackageName = "android"
 
+/** Android composes per-user UIDs as `userId * PER_USER_RANGE + appId`. */
+private const val PerUserUidRange = 100_000
+
+/**
+ * The user that owns the current process. `UserHandle.myUserId()` and `Context.getUserId()` are
+ * system APIs, so the id is derived from the process UID instead.
+ */
+internal fun currentProcessUserId(): Int = Process.myUid() / PerUserUidRange
+
+private fun userHandleFor(userId: Int): UserHandle =
+    UserHandle.getUserHandleForUid(userId * PerUserUidRange)
+
+/**
+ * Builds a context whose user is [userId] while keeping this process's own package identity.
+ * `createContextAsUser` (API 30+) and `createPackageContextAsUser` are system APIs, so they are
+ * invoked through reflection. The `android` package is special-cased by the framework: it copies
+ * the current context without looking the package up for [userId], which keeps working in users
+ * where Aether's host package (`com.android.shell`) is not installed.
+ */
+private fun createUserScopedContext(baseContext: Context, userId: Int): Context? {
+    val userHandle = runCatching { userHandleFor(userId) }.getOrNull() ?: return null
+    runCatching {
+        Context::class.java
+            .getMethod("createContextAsUser", UserHandle::class.java, Int::class.javaPrimitiveType)
+            .invoke(baseContext, userHandle, 0) as Context
+    }.getOrNull()?.let { return it }
+    return runCatching {
+        Context::class.java
+            .getMethod(
+                "createPackageContextAsUser",
+                String::class.java,
+                Int::class.javaPrimitiveType,
+                UserHandle::class.java,
+            )
+            .invoke(baseContext, SystemPackageName, 0, userHandle) as Context
+    }.getOrNull()
+}
+
 class AetherAgentModeShizukuService @Keep constructor(
     private val context: Context,
 ) : IAetherAgentModeService.Stub() {
@@ -62,25 +102,14 @@ class AetherAgentModeShizukuService @Keep constructor(
     }
 
     /**
-     * ClipboardService verifies the caller's op package against its UID. [privilegedContext] is a
-     * package context created from Aether's context, and such contexts keep Aether's op package, so
-     * under Shizuku (shell UID) every write failed with "Package com.baimoqilin.aether does not belong
-     * to 2000". Build the manager on a context that reports this process's own package instead.
+     * Shizuku user services and the su-based fallback both run with a system UID (shell 2000 /
+     * root 0), so [privilegedContext] always resolves the owner user. Every API that acts on "the
+     * user" (launching activities, listing apps, writing the clipboard) must be re-scoped to the
+     * user that owns Aether instead of silently operating user 0.
      */
-    @delegate:SuppressLint("DiscouragedPrivateApi")
-    private val clipboardManager: ClipboardManager by lazy {
-        val identityContext = object : ContextWrapper(privilegedContext) {
-            override fun getOpPackageName(): String = baseContext.packageName
-        }
-        runCatching {
-            ClipboardManager::class.java
-                .getDeclaredConstructor(Context::class.java, Handler::class.java)
-                .apply { isAccessible = true }
-                .newInstance(identityContext, null)
-        }.getOrNull()
-            ?: privilegedContext.getSystemService<ClipboardManager>()
-            ?: error("Clipboard service is unavailable for this display.")
-    }
+    private val serviceUserId: Int = currentProcessUserId()
+    private val userContexts = ConcurrentHashMap<Int, Context>()
+    private val clipboardManagers = ConcurrentHashMap<Int, ClipboardManager>()
     private val displays = ConcurrentHashMap<Int, VirtualDisplay>()
     private val imageReaders = ConcurrentHashMap<Int, ImageReader>()
     private val previewSurfaces = ConcurrentHashMap<Int, Surface>()
@@ -174,9 +203,10 @@ class AetherAgentModeShizukuService @Keep constructor(
         System.exit(0)
     }
 
-    override fun launchPackage(packageName: String, displayId: Int) {
-        val intent = privilegedContext.packageManager.getLaunchIntentForPackage(packageName)
-            ?: error("No launchable activity for $packageName.")
+    override fun launchPackage(packageName: String, displayId: Int, userId: Int) {
+        val launchContext = contextForUser(userId)
+        val intent = launchContext.packageManager.getLaunchIntentForPackage(packageName)
+            ?: error("No launchable activity for $packageName in user $userId.")
         val options = ActivityOptions.makeBasic()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             options.launchDisplayId = displayId
@@ -186,16 +216,16 @@ class AetherAgentModeShizukuService @Keep constructor(
 
         val targetDisplay = displayManager.getDisplay(displayId)
             ?: error("Display $displayId is not available.")
-        val displayContext = privilegedContext.createDisplayContext(targetDisplay)
+        val displayContext = launchContext.createDisplayContext(targetDisplay)
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-        PendingIntent.getActivity(
-            displayContext,
-            intent.hashCode(),
-            intent,
-            flags,
+        activityPendingIntentForUser(
+            context = displayContext,
+            intent = intent,
+            flags = flags,
+            userId = userId,
         ).send(
-            privilegedContext,
+            launchContext,
             0,
             null,
             null,
@@ -281,7 +311,7 @@ class AetherAgentModeShizukuService @Keep constructor(
         injectKeyEvent(displayId, downTime, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, code, 0)
     }
 
-    override fun text(displayId: Int, text: String): String {
+    override fun text(displayId: Int, text: String, userId: Int): String {
         ensureManagedDisplay(displayId)
         if (text.isEmpty()) return TextInputMethodKeyEvents
         val keyMap = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
@@ -289,7 +319,7 @@ class AetherAgentModeShizukuService @Keep constructor(
         // letters, ...). Those cannot be typed as KeyEvents, so the whole text is pasted instead.
         val events = keyMap.getEvents(text.toCharArray())
         if (events == null) {
-            pasteText(displayId, text)
+            pasteText(displayId, text, userId)
             return TextInputMethodClipboardPaste
         }
         var downTime = SystemClock.uptimeMillis()
@@ -315,8 +345,8 @@ class AetherAgentModeShizukuService @Keep constructor(
         return TextInputMethodKeyEvents
     }
 
-    private fun pasteText(displayId: Int, text: String) {
-        clipboardManager.setPrimaryClip(ClipData.newPlainText("Aether Agent Mode", text))
+    private fun pasteText(displayId: Int, text: String, userId: Int) {
+        clipboardManagerFor(userId).setPrimaryClip(ClipData.newPlainText("Aether Agent Mode", text))
         val downTime = SystemClock.uptimeMillis()
         injectKeyEvent(
             displayId = displayId,
@@ -512,8 +542,8 @@ class AetherAgentModeShizukuService @Keep constructor(
         }.toString()
 
     @Suppress("DEPRECATION")
-    override fun listInstalledAppsJson(): String {
-        val packageManager = privilegedContext.packageManager
+    override fun listInstalledAppsJson(userId: Int): String {
+        val packageManager = contextForUser(userId).packageManager
         val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val launchables = packageManager.queryIntentActivities(
             launcherIntent,
@@ -549,6 +579,71 @@ class AetherAgentModeShizukuService @Keep constructor(
         if (packageName == baseContext.packageName) return baseContext
         return baseContext.createPackageContext(packageName, Context.CONTEXT_IGNORE_SECURITY)
     }
+
+    private fun contextForUser(userId: Int): Context {
+        if (userId == serviceUserId) return privilegedContext
+        return userContexts.getOrPut(userId) {
+            createUserScopedContext(privilegedContext, userId)
+                ?: error(
+                    "Agent Mode could not switch to user $userId. Cross-user Agent Mode is not " +
+                        "supported by this device's framework."
+                )
+        }
+    }
+
+    /**
+     * `PendingIntent.getActivity` only stamps the context's user since Android 9; on Android 8 it
+     * always stamps the caller's user, which would silently launch in the owner user. Ask for the
+     * target user explicitly there, and refuse the fallback rather than acting on the wrong user.
+     */
+    private fun activityPendingIntentForUser(
+        context: Context,
+        intent: Intent,
+        flags: Int,
+        userId: Int,
+    ): PendingIntent {
+        if (userId != serviceUserId && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            val asUser = runCatching {
+                PendingIntent::class.java
+                    .getMethod(
+                        "getActivityAsUser",
+                        Context::class.java,
+                        Int::class.javaPrimitiveType,
+                        Intent::class.java,
+                        Int::class.javaPrimitiveType,
+                        Bundle::class.java,
+                        UserHandle::class.java,
+                    )
+                    .invoke(null, context, intent.hashCode(), intent, flags, null, userHandleFor(userId))
+                    as? PendingIntent
+            }.getOrNull()
+                ?: error("Agent Mode cannot launch apps as user $userId on this Android version.")
+            return asUser
+        }
+        return PendingIntent.getActivity(context, intent.hashCode(), intent, flags)
+    }
+
+    /**
+     * ClipboardService verifies the caller's op package against its UID. [contextForUser] keeps
+     * Aether's op package, so build the manager on a context that reports this process's own
+     * package instead.
+     */
+    @SuppressLint("DiscouragedPrivateApi")
+    private fun clipboardManagerFor(userId: Int): ClipboardManager =
+        clipboardManagers.getOrPut(userId) {
+            val userContext = contextForUser(userId)
+            val identityContext = object : ContextWrapper(userContext) {
+                override fun getOpPackageName(): String = baseContext.packageName
+            }
+            runCatching {
+                ClipboardManager::class.java
+                    .getDeclaredConstructor(Context::class.java, Handler::class.java)
+                    .apply { isAccessible = true }
+                    .newInstance(identityContext, null)
+            }.getOrNull()
+                ?: privilegedContext.getSystemService<ClipboardManager>()
+                ?: error("Clipboard service is unavailable for this display.")
+        }
 
     private fun packageNameForCurrentProcess(defaultPackageName: String): String =
         when (Process.myUid()) {
