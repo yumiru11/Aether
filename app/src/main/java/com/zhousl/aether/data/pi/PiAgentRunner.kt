@@ -731,7 +731,10 @@ private fun hostToolPayload(
     put("tool_name", toolName)
     put("arguments_json", argumentsJson)
     put("output_json", visibleOutput)
-    put("raw_output_json", rawOutput)
+    // The screenshot bytes travel in the image content block below. The same payload also goes out with
+    // the tool result, so sending the base64 there as well stores every capture twice; the browser tool
+    // already strips it for its own results and agent_display now does the same.
+    put("raw_output_json", AetherToolExecutor.sanitizeToolOutputForConversation(toolName, rawOutput))
     put("is_error", isError)
     if (systemPrompt.isNotBlank()) put("system_prompt", systemPrompt)
     put(
