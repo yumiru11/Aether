@@ -250,6 +250,13 @@
     <string name="settings_agent_mode_method_shizuku_subtitle">使用提权的 Shizuku 服务。</string>
     <string name="settings_agent_mode_method_root_subtitle">使用 root shell 执行特权输入。</string>
     <string name="settings_agent_mode_method_description">Shizuku 模式通过 Shizuku 用户服务创建显示，让应用在主屏幕之外渲染。Root 模式仍属实验性。</string>
+    <string name="settings_agent_mode_perception">界面感知</string>
+    <string name="settings_agent_mode_perception_description">决定每一步之后模型看到的内容。界面元素带有文字和每个控件的精确范围，因此点击不再依赖从缩放图上目测坐标。</string>
+    <string name="settings_agent_mode_perception_elements_with_screenshot">元素 + 截图</string>
+    <string name="settings_agent_mode_perception_elements_with_screenshot_subtitle">优先读取界面元素；在本机读不到时说明原因并回退截图。</string>
+    <string name="settings_agent_mode_perception_elements">仅元素</string>
+    <string name="settings_agent_mode_perception_elements_subtitle">只读取界面元素。只有在模型主动要求时才截图。</string>
+
     <string name="settings_virtual_display">虚拟显示</string>
     <string name="settings_agent_mode_display_active">显示 %1$s 正在以 %2$d x %3$d 运行。</string>
     <string name="settings_agent_mode_no_virtual_display">当前没有活动的 Agent 模式虚拟显示。</string>
@@ -778,6 +785,16 @@
     <string name="tool_title_typed_agent_mode">已输入文本</string>
     <string name="tool_title_capturing_agent_mode_display">正在截取 Agent 模式显示</string>
     <string name="tool_title_captured_agent_mode_display">已截取 Agent 模式显示</string>
+    <string name="tool_title_reading_agent_mode_elements">正在读取界面元素</string>
+    <string name="tool_title_read_agent_mode_elements">已读取界面元素</string>
+    <string name="tool_title_long_pressing_agent_mode_display">正在长按 Agent 模式显示</string>
+    <string name="tool_title_long_pressed_agent_mode_display">已长按 Agent 模式显示</string>
+    <string name="tool_title_scrolling_agent_mode_display">正在滚动 Agent 模式显示</string>
+    <string name="tool_title_scrolled_agent_mode_display">已滚动 Agent 模式显示</string>
+    <string name="tool_title_waiting_agent_mode">正在等待 Agent 模式显示</string>
+    <string name="tool_title_waited_agent_mode">已等待 Agent 模式显示</string>
+    <string name="tool_title_running_agent_mode_steps">正在执行 Agent 模式步骤</string>
+    <string name="tool_title_ran_agent_mode_steps">已执行 Agent 模式步骤</string>
     <string name="tool_title_using_agent_mode_display">正在使用 Agent 模式显示</string>
     <string name="tool_title_used_agent_mode_display">已使用 Agent 模式显示</string>
     <string name="tool_title_starting_chrome">正在启动 Chrome</string>

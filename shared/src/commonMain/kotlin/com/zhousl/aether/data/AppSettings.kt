@@ -38,6 +38,37 @@ enum class AgentModeAuthorizationMethod(
     }
 }
 
+/**
+ * What Agent Mode shows the model after every action.
+ *
+ * Elements are the primary channel because they carry the text, the bounds and the interaction state
+ * of each control, which is what a tap needs to be accurate. A screenshot stays available either way:
+ * as an explicit request from the model, or as the stated fallback when the element tree cannot be
+ * read on this device or display.
+ */
+enum class AgentModePerception(
+    val storageValue: String,
+) {
+    /** Read elements, and fall back to a screenshot - saying why - when they cannot be read. */
+    ElementsWithScreenshot(
+        storageValue = "elements_with_screenshot",
+    ),
+
+    /** Read elements only. A screenshot is taken only when the model explicitly asks for one. */
+    Elements(
+        storageValue = "elements",
+    ),
+    ;
+
+    companion object {
+        fun fromStorage(
+            value: String?,
+            defaultValue: AgentModePerception = ElementsWithScreenshot,
+        ): AgentModePerception =
+            entries.firstOrNull { it.storageValue == value } ?: defaultValue
+    }
+}
+
 @Serializable
 enum class AppLanguage(
     val storageValue: String,
@@ -164,6 +195,7 @@ data class AppSettings(
     val alpineEnvironmentVariables: List<AlpineEnvironmentVariable> = emptyList(),
     val agentModeAuthorizationEnabled: Boolean = false,
     val agentModeAuthorizationMethod: AgentModeAuthorizationMethod = AgentModeAuthorizationMethod.Shizuku,
+    val agentModePerception: AgentModePerception = AgentModePerception.ElementsWithScreenshot,
     val language: AppLanguage = defaultAppLanguage(),
     val themeMode: AppThemeMode = AppThemeMode.System,
     val defaultChatModelKey: String = "",

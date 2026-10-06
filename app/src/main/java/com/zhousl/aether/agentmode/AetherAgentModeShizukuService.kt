@@ -12,12 +12,14 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Point
+import android.graphics.Rect
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
 import android.os.Binder
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
@@ -30,9 +32,12 @@ import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
+import android.view.ViewConfiguration
+import android.view.accessibility.AccessibilityNodeInfo
 import androidx.annotation.Keep
 import androidx.core.content.getSystemService
 import java.io.OutputStream
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
 import org.json.JSONObject
@@ -54,6 +59,15 @@ private const val TextInputMethodKeyEvents = "key_events"
 private const val TextInputMethodClipboardPaste = "clipboard_paste"
 private const val SystemPackageName = "android"
 private const val RootUid = 0
+
+/** How deep the search for an editable field inside the element the model pointed at may go. */
+private const val AgentModeMaxEditableSearchDepth = 6
+
+/** How far up the tree a scrollable container is looked for. */
+private const val AgentModeMaxScrollAncestorDepth = 8
+
+/** Pause before reading a written field back; apps publish the new text one layout pass later. */
+private const val AgentModeTextVerificationDelayMillis = 60L
 
 /**
  * The privileged Agent Mode service. It runs in a separate shell (Shizuku) or root process started
@@ -129,6 +143,13 @@ class AetherAgentModeShizukuService @Keep constructor(
             error("Agent Mode cannot act on behalf of Android user $user: ${cause.message ?: cause.javaClass.simpleName}")
         }
     }
+    /**
+     * Reads the accessibility tree of the Agent Mode display. Kept next to the display it observes so
+     * the connection is created, and torn down, by the same process that owns the display.
+     */
+    private val elementReader: AgentModeElementReader by lazy {
+        AgentModeElementReader(privilegedContext)
+    }
     private val displays = ConcurrentHashMap<Int, VirtualDisplay>()
     private val imageReaders = ConcurrentHashMap<Int, ImageReader>()
     private val previewSurfaces = ConcurrentHashMap<Int, Surface>()
@@ -202,6 +223,10 @@ class AetherAgentModeShizukuService @Keep constructor(
     }
 
     override fun releaseDisplay(displayId: Int) {
+        // The automation connection is bound to one display; once that display is gone the connection
+        // is stale, and holding it would keep the system's single UiAutomation slot away from tools
+        // the user may want to run themselves.
+        runCatching { elementReader.detach() }
         synchronized(displayLock(displayId)) {
             previewSurfaces.remove(displayId)
             displays.remove(displayId)?.release()
@@ -212,6 +237,7 @@ class AetherAgentModeShizukuService @Keep constructor(
     }
 
     override fun destroy() {
+        runCatching { elementReader.detach() }
         displays.keys.toList().forEach { displayId ->
             runCatching { releaseDisplay(displayId) }
         }
@@ -396,6 +422,43 @@ class AetherAgentModeShizukuService @Keep constructor(
         maxEdge: Int,
         quality: Int,
     ) {
+        captureToFd(displayId, output, maxEdge, quality, region = null)
+    }
+
+    /**
+     * Captures a rectangle of the display.
+     *
+     * The crop is what makes a coordinate tap on a small control accurate: a full screen is delivered
+     * downscaled, so every pixel the model misreads on the image is multiplied on the way back to
+     * device pixels. A crop whose longest edge still fits under [maxEdge] is delivered at 1:1, and
+     * reports its own origin so the conversion stays a single addition.
+     */
+    override fun captureRegionToFd(
+        displayId: Int,
+        output: ParcelFileDescriptor,
+        maxEdge: Int,
+        quality: Int,
+        left: Int,
+        top: Int,
+        right: Int,
+        bottom: Int,
+    ) {
+        captureToFd(
+            displayId = displayId,
+            output = output,
+            maxEdge = maxEdge,
+            quality = quality,
+            region = Rect(left, top, right, bottom),
+        )
+    }
+
+    private fun captureToFd(
+        displayId: Int,
+        output: ParcelFileDescriptor,
+        maxEdge: Int,
+        quality: Int,
+        region: Rect?,
+    ) {
         val display = displays[displayId]
             ?: error("Display $displayId is not managed by Aether Agent Mode.")
         val reader = imageReaders[displayId]
@@ -416,6 +479,7 @@ class AetherAgentModeShizukuService @Keep constructor(
                                 output = stream,
                                 maxEdge = boundedMaxEdge,
                                 quality = boundedQuality,
+                                region = region,
                             )
                         } finally {
                             image.close()
@@ -427,6 +491,7 @@ class AetherAgentModeShizukuService @Keep constructor(
                             output = stream,
                             maxEdge = boundedMaxEdge,
                             quality = boundedQuality,
+                            region = region,
                         )
                     } else {
                         error("Timed out while capturing display $displayId.")
@@ -465,10 +530,11 @@ class AetherAgentModeShizukuService @Keep constructor(
         output: OutputStream,
         maxEdge: Int,
         quality: Int,
+        region: Rect?,
     ) {
         val bitmap = Bitmap.createBitmap(
-            width.coerceAtLeast(1),
-            height.coerceAtLeast(1),
+            (region?.width() ?: width).coerceAtLeast(1),
+            (region?.height() ?: height).coerceAtLeast(1),
             Bitmap.Config.ARGB_8888,
         )
         try {
@@ -492,6 +558,7 @@ class AetherAgentModeShizukuService @Keep constructor(
         output: OutputStream,
         maxEdge: Int,
         quality: Int,
+        region: Rect?,
     ) {
         val plane = image.planes.firstOrNull()
             ?: error("Captured display image had no pixel planes.")
@@ -510,14 +577,19 @@ class AetherAgentModeShizukuService @Keep constructor(
                 Bitmap.createBitmap(paddedBitmap, 0, 0, width, height)
             }
             try {
-                val scaledBitmap = scaleBitmapIfNeeded(bitmap, maxEdge)
+                val croppedBitmap = cropBitmap(bitmap, region)
                 try {
-                    if (!scaledBitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)) {
-                        error("Unable to encode Agent Mode screenshot.")
+                    val scaledBitmap = scaleBitmapIfNeeded(croppedBitmap, maxEdge)
+                    try {
+                        if (!scaledBitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)) {
+                            error("Unable to encode Agent Mode screenshot.")
+                        }
+                        output.flush()
+                    } finally {
+                        if (scaledBitmap !== croppedBitmap) scaledBitmap.recycle()
                     }
-                    output.flush()
                 } finally {
-                    if (scaledBitmap !== bitmap) scaledBitmap.recycle()
+                    if (croppedBitmap !== bitmap) croppedBitmap.recycle()
                 }
             } finally {
                 if (bitmap !== paddedBitmap) bitmap.recycle()
@@ -525,6 +597,17 @@ class AetherAgentModeShizukuService @Keep constructor(
         } finally {
             paddedBitmap.recycle()
         }
+    }
+
+    /** Crops a captured frame, clamped to it; a null region and a full-frame region are both no-ops. */
+    private fun cropBitmap(bitmap: Bitmap, region: Rect?): Bitmap {
+        if (region == null) return bitmap
+        val left = region.left.coerceIn(0, bitmap.width - 1)
+        val top = region.top.coerceIn(0, bitmap.height - 1)
+        val right = region.right.coerceIn(left + 1, bitmap.width)
+        val bottom = region.bottom.coerceIn(top + 1, bitmap.height)
+        if (left == 0 && top == 0 && right == bitmap.width && bottom == bitmap.height) return bitmap
+        return Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
     }
 
     private fun scaleBitmapIfNeeded(bitmap: Bitmap, maxEdge: Int): Bitmap {
@@ -748,6 +831,545 @@ class AetherAgentModeShizukuService @Keep constructor(
         is KeyEvent -> "key ${KeyEvent.keyCodeToString(event.keyCode)} ${if (event.action == KeyEvent.ACTION_DOWN) "down" else "up"}"
         else -> "input event"
     }
+
+    // ── Element observation and element-targeted actions ─────────────────────
+
+    override fun elementCapabilitiesJson(): String = elementReader.capabilitiesJson()
+
+    override fun observeElementsJson(displayId: Int, optionsJson: String): String {
+        ensureManagedDisplay(displayId)
+        return elementReader.observe(displayId, optionsJson)
+    }
+
+    override fun settleJson(displayId: Int, optionsJson: String): String {
+        ensureManagedDisplay(displayId)
+        return elementReader.settle(displayId, optionsJson)
+    }
+
+    override fun detachElementReader() {
+        elementReader.detach()
+    }
+
+    /**
+     * Runs one element-targeted action inside a single binder call.
+     *
+     * The tree is read once to re-locate the target, the gesture is delivered, the screen is polled
+     * until it stops changing, and the answer says what changed and what the coordinates landed on.
+     * Doing all of that per action is what turns "tap, then look, then decide" into one step, and it is
+     * also why a result can be specific about a failure instead of only reporting "ok".
+     */
+    override fun elementActionJson(displayId: Int, requestJson: String): String {
+        ensureManagedDisplay(displayId)
+        val request = runCatching { JSONObject(requestJson) }.getOrNull()
+            ?: return elementActionResult(
+                displayId = displayId,
+                kind = "",
+                ok = false,
+                message = "Element action arguments were not valid JSON.",
+            )
+        val kind = request.optString("kind").trim().lowercase()
+        return runCatching { runElementAction(displayId, kind, request) }
+            .getOrElse { throwable ->
+                elementActionResult(
+                    displayId = displayId,
+                    kind = kind,
+                    ok = false,
+                    message = throwable.message ?: throwable.javaClass.simpleName,
+                )
+            }
+    }
+
+    private fun runElementAction(displayId: Int, kind: String, request: JSONObject): String {
+        val screen = managedDisplayBounds(displayId)
+            ?: return elementActionResult(displayId, kind, false, "Display $displayId is not available.")
+        val targetId = request.optInt("target_id", 0)
+        // A coordinate gesture is the only kind that can be served without the tree. Everything else
+        // reports why it cannot be served instead of reporting a success it did not achieve.
+        val needsTree = targetId != 0 || kind == "set_text" || kind == "scroll" || kind == "hit_test"
+        val capability = elementReader.capability(displayId)
+        if (!capability.isAvailable && needsTree) {
+            return capability.failureJson(kind)
+        }
+
+        val before = elementReader.observedObservation(displayId)
+        val read = if (capability.isAvailable) elementReader.read(displayId) else null
+        var target: AgentModeElement? = null
+        if (targetId != 0) {
+            val tree = read ?: return capability.failureJson(kind)
+            when (val resolution = resolveAgentModeTarget(targetId, before?.elements.orEmpty(), tree.elements)) {
+                is AgentModeTargetResolution.Unknown -> return elementActionResult(
+                    displayId = displayId,
+                    kind = kind,
+                    ok = false,
+                    message = "Element $targetId was never observed on display $displayId.",
+                    stdout = elementReader.renderRead(displayId, tree).text,
+                )
+
+                is AgentModeTargetResolution.Gone -> return elementActionResult(
+                    displayId = displayId,
+                    kind = kind,
+                    ok = false,
+                    message = "Element " + targetId + " (" + resolution.className + ", " +
+                        resolution.label + ") is no longer on screen.",
+                    stdout = elementReader.renderRead(displayId, tree).text,
+                )
+
+                is AgentModeTargetResolution.Resolved -> target = resolution.element
+            }
+        }
+
+        val context = ElementActionContext(
+            displayId = displayId,
+            kind = kind,
+            request = request,
+            screen = screen,
+            capability = capability,
+            read = read,
+            before = before,
+            target = target,
+        )
+        return when (kind) {
+            "tap" -> performElementTouch(context, longPress = false)
+            "long_press" -> performElementTouch(context, longPress = true)
+            "set_text" -> performElementText(context)
+            "scroll" -> performElementScroll(context)
+            "hit_test" -> performHitTest(context)
+            else -> elementActionResult(displayId, kind, false, "Unsupported element action '$kind'.")
+        }
+    }
+
+    private data class ElementActionContext(
+        val displayId: Int,
+        val kind: String,
+        val request: JSONObject,
+        val screen: AgentModeBounds,
+        val capability: AgentModeElementCapability,
+        val read: AgentModeTreeRead?,
+        val before: AgentModeObservation?,
+        val target: AgentModeElement?,
+    )
+
+    private fun performElementTouch(context: ElementActionContext, longPress: Boolean): String {
+        val target = context.target
+        val resolvedPoint: AgentModeTapPoint.Resolved
+        if (target != null) {
+            when (val point = resolveAgentModeTapPoint(target, context.screen)) {
+                is AgentModeTapPoint.Unresolved -> return elementActionResult(
+                    displayId = context.displayId,
+                    kind = context.kind,
+                    ok = false,
+                    message = "Element " + target.id + " cannot be tapped: " + point.reason + ".",
+                )
+
+                is AgentModeTapPoint.Resolved -> resolvedPoint = point
+            }
+        } else {
+            val x = context.request.optInt("x", Int.MIN_VALUE)
+            val y = context.request.optInt("y", Int.MIN_VALUE)
+            if (x == Int.MIN_VALUE || y == Int.MIN_VALUE) {
+                return elementActionResult(
+                    displayId = context.displayId,
+                    kind = context.kind,
+                    ok = false,
+                    message = "Provide either target_id, or both x and y in display pixels.",
+                )
+            }
+            if (!context.screen.contains(x, y)) {
+                // Accessibility bounds and the coordinate space a touch is injected into come from
+                // different parts of the platform. When they disagree the touch is refused here rather
+                // than delivered somewhere the model did not ask for.
+                return elementActionResult(
+                    displayId = context.displayId,
+                    kind = context.kind,
+                    ok = false,
+                    message = "Point (" + x + ", " + y + ") is outside display " +
+                        context.screen.width + "x" + context.screen.height + ".",
+                )
+            }
+            resolvedPoint = AgentModeTapPoint.Resolved(x = x, y = y, elementId = AgentModeNoTapTarget)
+        }
+
+        val delivery = AgentModeDelivery.fromStorage(context.request.optString("via"))
+        val extras = JSONObject().apply {
+            put("delivery", delivery.storageValue)
+            put("point_x", resolvedPoint.x)
+            put("point_y", resolvedPoint.y)
+            if (target != null) {
+                put("target", target.id)
+                if (target.label.isNotBlank()) put("target_label", target.label)
+            }
+            if (resolvedPoint.note.isNotBlank()) put("note", resolvedPoint.note)
+        }
+
+        if (delivery == AgentModeDelivery.Action) {
+            val node = context.read?.nodes?.get(resolvedPoint.elementId)
+            val action = if (longPress) {
+                AccessibilityNodeInfo.ACTION_LONG_CLICK
+            } else {
+                AccessibilityNodeInfo.ACTION_CLICK
+            }
+            val accepted = node != null && runCatching { node.performAction(action) }.getOrDefault(false)
+            if (!accepted) {
+                // A refusal is reported rather than papered over with a touch retry: a model that knows
+                // the node action was rejected can ask for the other delivery itself.
+                return elementActionResult(
+                    displayId = context.displayId,
+                    kind = context.kind,
+                    ok = false,
+                    message = "The element refused the accessibility click action.",
+                    extras = extras,
+                )
+            }
+        } else if (longPress) {
+            val deviceTimeout = runCatching { ViewConfiguration.getLongPressTimeout() }.getOrDefault(0)
+            val requested = context.request.optInt("duration_ms", 0).takeIf { it > 0 }
+            injectLongPress(
+                displayId = context.displayId,
+                x = resolvedPoint.x,
+                y = resolvedPoint.y,
+                durationMillis = agentModeLongPressMillis(deviceTimeout, requested),
+            )
+        } else {
+            tap(context.displayId, resolvedPoint.x, resolvedPoint.y)
+        }
+
+        return finishElementAction(context = context, extras = extras, point = resolvedPoint)
+    }
+
+    private fun performElementText(context: ElementActionContext): String {
+        val tree = context.read
+            ?: return elementActionResult(context.displayId, context.kind, false, "The element tree is unavailable.")
+        val text = context.request.optString("text")
+        if (text.isEmpty()) {
+            return elementActionResult(context.displayId, context.kind, false, "'text' is required.")
+        }
+        val node = resolveEditableNode(context, tree)
+        if (node == null) {
+            // The old text action could only report that typing produced no error. Naming the reason is
+            // the difference between "the field rejected the write" and "there was no field".
+            val verification = if (context.target != null) {
+                AgentModeTextVerification.NotEditable
+            } else {
+                AgentModeTextVerification.NoField
+            }
+            return elementActionResult(
+                displayId = context.displayId,
+                kind = context.kind,
+                ok = false,
+                message = if (verification == AgentModeTextVerification.NotEditable) {
+                    "The element the model pointed at is not an input field."
+                } else {
+                    "No editable field is on screen to write into."
+                },
+                extras = JSONObject().put("text_verification", verification.storageValue),
+            )
+        }
+
+        val beforeText = runCatching { node.text?.toString().orEmpty() }.getOrDefault("")
+        runCatching { node.performAction(AccessibilityNodeInfo.ACTION_FOCUS) }
+        val arguments = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        }
+        val accepted = runCatching {
+            node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        }.getOrDefault(false)
+        SystemClock.sleep(AgentModeTextVerificationDelayMillis)
+        val refreshed = runCatching { node.refresh() }.getOrDefault(false)
+        val observed = if (refreshed) runCatching { node.text?.toString() }.getOrNull() else null
+        val verification = classifyAgentModeTextWrite(
+            expected = text,
+            observed = observed,
+            nodeRefreshed = refreshed,
+            actionAccepted = accepted,
+        )
+
+        val extras = JSONObject().apply {
+            put("method", "action_set_text")
+            put("text_verification", verification.storageValue)
+            if (beforeText.isNotBlank()) put("before_text", beforeText)
+            if (observed != null) put("verified_text", observed)
+            context.target?.let { element -> put("target", element.id) }
+        }
+        if (verification != AgentModeTextVerification.Matched) {
+            return elementActionResult(
+                displayId = context.displayId,
+                kind = context.kind,
+                ok = false,
+                message = "The field did not confirm the write (" + verification.storageValue + ").",
+                extras = extras,
+            )
+        }
+        if (context.request.optBoolean("submit", false)) {
+            key(context.displayId, "KEYCODE_ENTER")
+        }
+        return finishElementAction(context = context, extras = extras)
+    }
+
+    private fun performElementScroll(context: ElementActionContext): String {
+        val tree = context.read
+            ?: return elementActionResult(context.displayId, context.kind, false, "The element tree is unavailable.")
+        val direction = AgentModeScrollDirection.fromStorage(context.request.optString("direction", "down"))
+            ?: return elementActionResult(
+                context.displayId,
+                context.kind,
+                false,
+                "'direction' must be one of up, down, left or right.",
+            )
+        val node = findScrollableNode(context, tree)
+            ?: return elementActionResult(
+                context.displayId,
+                context.kind,
+                false,
+                "No scrollable element is on screen.",
+            )
+        val accepted = runCatching { node.performAction(agentModeScrollAction(direction)) }.getOrDefault(false)
+        if (!accepted) {
+            return elementActionResult(
+                context.displayId,
+                context.kind,
+                false,
+                "The scrollable element refused the scroll action; it may already be at its end.",
+            )
+        }
+        val extras = JSONObject().apply {
+            put("direction", direction.storageValue)
+            put("delivery", "accessibility_action")
+        }
+        return finishElementAction(context = context, extras = extras)
+    }
+
+    private fun performHitTest(context: ElementActionContext): String {
+        val tree = context.read
+            ?: return elementActionResult(context.displayId, context.kind, false, "The element tree is unavailable.")
+        val x = context.request.optInt("x", Int.MIN_VALUE)
+        val y = context.request.optInt("y", Int.MIN_VALUE)
+        if (x == Int.MIN_VALUE || y == Int.MIN_VALUE) {
+            return elementActionResult(context.displayId, context.kind, false, "'x' and 'y' are required.")
+        }
+        return JSONObject().apply {
+            put("ok", true)
+            put("action", context.kind)
+            put("display_id", context.displayId)
+            put("point_x", x)
+            put("point_y", y)
+            appendHit(this, tree.elements, x, y)
+        }.toString()
+    }
+
+    /**
+     * Polls the screen until it stops changing, then reports the effect and what changed.
+     *
+     * The poll replaces the fixed sleeps every action used to carry. It is also the only signal the
+     * model ever gets that the screen was still moving when it acted, which the issue that asked for
+     * element observation listed as a missing capability.
+     */
+    private fun finishElementAction(
+        context: ElementActionContext,
+        extras: JSONObject,
+        point: AgentModeTapPoint.Resolved? = null,
+    ): String {
+        val outcome = if (context.capability.isAvailable) {
+            elementReader.settleRead(
+                displayId = context.displayId,
+                timeoutMillis = context.request.optLong("settle_timeout_ms", AgentModeSettleTimeoutMillis),
+            )
+        } else {
+            null
+        }
+        val after = outcome?.read
+        if (after != null) {
+            elementReader.recordObservation(
+                context.displayId,
+                AgentModeObservation(after.elements, after.windowCount),
+            )
+        }
+        val effect = compareAgentModeScreenSignatures(
+            before = context.before?.let { observation ->
+                agentModeScreenSignature(observation.windowCount, observation.elements)
+            },
+            after = after?.let { tree -> agentModeScreenSignature(tree.windowCount, tree.elements) },
+        )
+        val delta = if (after != null && context.before != null) {
+            renderAgentModeElementDelta(diffAgentModeElements(context.before.elements, after.elements))
+        } else {
+            null
+        }
+
+        return JSONObject().apply {
+            put("ok", true)
+            put("action", context.kind)
+            put("display_id", context.displayId)
+            if (outcome != null) {
+                put("settled", outcome.report.settled)
+                put("settle_ms", outcome.report.elapsedMillis)
+                put("settle_signal", outcome.report.signal)
+            } else {
+                put("settled", JSONObject.NULL)
+                put("settle_ms", 0L)
+                put("settle_signal", "none")
+                put("elements_unavailable", context.capability.availability.storageValue)
+            }
+            put("effect", effect.effect.name.lowercase(Locale.US))
+            if (effect.changedSignals.isNotEmpty()) {
+                put("effect_signals", JSONArray(effect.changedSignals))
+            }
+            extras.keys().forEach { key -> put(key, extras.get(key)) }
+            if (delta != null) {
+                put("delta", delta)
+            } else if (effect.effect == AgentModeEffect.Changed) {
+                // A change too large to summarize is stated as such; a partial list would read as the
+                // whole screen and mislead the model about what is there now.
+                put("screen_changed", true)
+            }
+            if (point != null) {
+                if (after != null) {
+                    appendHit(this, after.elements, point.x, point.y)
+                } else {
+                    put("hit", "unknown")
+                }
+            }
+            put("stdout", "ok")
+        }.toString()
+    }
+
+    /** Says what a coordinate landed on, or what the nearest control was when it landed on nothing. */
+    private fun appendHit(target: JSONObject, elements: List<AgentModeElement>, x: Int, y: Int) {
+        val hit = hitTestAgentModeElement(elements, x, y)
+        if (hit != null) {
+            target.put(
+                "hit",
+                JSONObject().apply {
+                    put("id", hit.id)
+                    put("class", shortClassName(hit.className))
+                    if (hit.label.isNotBlank()) put("label", hit.label)
+                    put("bounds", boundsText(hit.bounds))
+                },
+            )
+            return
+        }
+        target.put("hit", "none")
+        val nearest = nearestActionableAgentModeElement(elements, x, y) ?: return
+        target.put(
+            "nearest_interactive",
+            JSONObject().apply {
+                put("id", nearest.id)
+                put("class", shortClassName(nearest.className))
+                if (nearest.label.isNotBlank()) put("label", nearest.label)
+                put("bounds", boundsText(nearest.bounds))
+                put("distance_px", nearest.bounds.distanceTo(x, y))
+            },
+        )
+    }
+
+    private fun resolveEditableNode(
+        context: ElementActionContext,
+        tree: AgentModeTreeRead,
+    ): AccessibilityNodeInfo? {
+        val target = context.target
+        if (target != null) {
+            val node = tree.nodes[target.id] ?: return null
+            if (node.isEditable) return node
+            return findEditableDescendant(node, depth = 0)
+        }
+        // Without a target the focused field is used, which is the contract the plain text action has
+        // always had; a screen with exactly one input is unambiguous enough to be worth accepting.
+        val focusedEditable = tree.elements.firstOrNull { it.signals.focused && it.signals.editable }
+        if (focusedEditable != null) tree.nodes[focusedEditable.id]?.let { return it }
+        val focusedAny = tree.elements.firstOrNull { it.signals.focused }
+        if (focusedAny != null) {
+            val node = tree.nodes[focusedAny.id]
+            if (node != null) findEditableDescendant(node, depth = 0)?.let { return it }
+        }
+        return tree.nodes.values.filter { it.isEditable }.singleOrNull()
+    }
+
+    private fun findEditableDescendant(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+        if (node.isEditable) return node
+        if (depth >= AgentModeMaxEditableSearchDepth) return null
+        for (index in 0 until node.childCount) {
+            val child = runCatching { node.getChild(index) }.getOrNull() ?: continue
+            findEditableDescendant(child, depth + 1)?.let { return it }
+        }
+        return null
+    }
+
+    private fun findScrollableNode(
+        context: ElementActionContext,
+        tree: AgentModeTreeRead,
+    ): AccessibilityNodeInfo? {
+        val target = context.target
+        if (target != null) {
+            val node = tree.nodes[target.id]
+            if (node != null) {
+                findScrollableAncestor(node, depth = 0)?.let { return it }
+                findScrollableDescendant(node, depth = 0)?.let { return it }
+            }
+        }
+        val scrollable = tree.elements.firstOrNull { it.signals.scrollable } ?: return null
+        return tree.nodes[scrollable.id]
+    }
+
+    private fun findScrollableAncestor(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+        if (node.isScrollable) return node
+        if (depth >= AgentModeMaxScrollAncestorDepth) return null
+        val parent = runCatching { node.parent }.getOrNull() ?: return null
+        return findScrollableAncestor(parent, depth + 1)
+    }
+
+    private fun findScrollableDescendant(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+        if (node.isScrollable) return node
+        if (depth >= AgentModeMaxEditableSearchDepth) return null
+        for (index in 0 until node.childCount) {
+            val child = runCatching { node.getChild(index) }.getOrNull() ?: continue
+            findScrollableDescendant(child, depth + 1)?.let { return it }
+        }
+        return null
+    }
+
+    /** A press that outlasts the platform's own long-press timeout, so the app sees a long press. */
+    private fun injectLongPress(displayId: Int, x: Int, y: Int, durationMillis: Long) {
+        ensureManagedDisplay(displayId)
+        val downTime = SystemClock.uptimeMillis()
+        injectMotionEvent(displayId, downTime, downTime, MotionEvent.ACTION_DOWN, x.toFloat(), y.toFloat())
+        SystemClock.sleep(durationMillis)
+        injectMotionEvent(
+            displayId,
+            downTime,
+            SystemClock.uptimeMillis(),
+            MotionEvent.ACTION_UP,
+            x.toFloat(),
+            y.toFloat(),
+        )
+    }
+
+    private fun managedDisplayBounds(displayId: Int): AgentModeBounds? {
+        val display = displays[displayId]?.display ?: return null
+        val size = Point()
+        @Suppress("DEPRECATION")
+        display.getRealSize(size)
+        val width = (display.mode?.physicalWidth ?: size.x).takeIf { it > 0 } ?: return null
+        val height = (display.mode?.physicalHeight ?: size.y).takeIf { it > 0 } ?: return null
+        return AgentModeBounds(0, 0, width, height)
+    }
+
+    private fun elementActionResult(
+        displayId: Int,
+        kind: String,
+        ok: Boolean,
+        message: String = "",
+        stdout: String = "",
+        extras: JSONObject? = null,
+    ): String = JSONObject().apply {
+        put("ok", ok)
+        if (kind.isNotBlank()) put("action", kind)
+        put("display_id", displayId)
+        if (!ok && message.isNotBlank()) put("errmsg", message)
+        if (stdout.isNotBlank()) put("stdout", stdout)
+        extras?.keys()?.forEach { key -> put(key, extras.get(key)) }
+    }.toString()
+
+    private fun boundsText(bounds: AgentModeBounds): String =
+        bounds.left.toString() + ',' + bounds.top + ',' + bounds.right + ',' + bounds.bottom
 
     private fun parseKeyCode(rawValue: String): Int {
         val normalized = rawValue.trim()

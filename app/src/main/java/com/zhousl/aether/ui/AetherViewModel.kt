@@ -17,6 +17,7 @@ import com.zhousl.aether.data.AetherModServiceMethod
 import com.zhousl.aether.data.AppUpdateManager
 import com.zhousl.aether.data.AutomaticModelPurpose
 import com.zhousl.aether.data.AgentModeAuthorizationMethod
+import com.zhousl.aether.data.AgentModePerception
 import com.zhousl.aether.data.AgentWorkspaceMode
 import com.zhousl.aether.data.AlpineEnvironmentVariable
 import com.zhousl.aether.data.AppLanguage
@@ -2571,6 +2572,15 @@ class AetherViewModel(
         }
         viewModelScope.launch {
             settingsRepository.updateAgentModeAuthorization(enabled, method)
+        }
+    }
+
+    fun saveAgentModePerception(perception: AgentModePerception) {
+        _uiState.update { current ->
+            current.copy(settings = current.settings.copy(agentModePerception = perception))
+        }
+        viewModelScope.launch {
+            settingsRepository.updateAgentModePerception(perception)
         }
     }
 

@@ -4195,8 +4195,27 @@ private fun formatAgentDisplayTitle(
             subject = arguments?.optString("target").orEmpty(),
             fallback = context.getString(R.string.tool_title_agent_mode_app_fallback),
         )
+        "observe" -> context.getString(
+            if (isRunning) R.string.tool_title_reading_agent_mode_elements else R.string.tool_title_read_agent_mode_elements,
+        )
         "tap" -> context.getString(if (isRunning) R.string.tool_title_tapping_agent_mode_display else R.string.tool_title_tapped_agent_mode_display)
+        "long_press" -> context.getString(
+            if (isRunning) {
+                R.string.tool_title_long_pressing_agent_mode_display
+            } else {
+                R.string.tool_title_long_pressed_agent_mode_display
+            },
+        )
         "swipe" -> context.getString(if (isRunning) R.string.tool_title_swiping_agent_mode_display else R.string.tool_title_swiped_agent_mode_display)
+        "scroll" -> context.getString(
+            if (isRunning) R.string.tool_title_scrolling_agent_mode_display else R.string.tool_title_scrolled_agent_mode_display,
+        )
+        "wait" -> context.getString(
+            if (isRunning) R.string.tool_title_waiting_agent_mode else R.string.tool_title_waited_agent_mode,
+        )
+        "batch" -> context.getString(
+            if (isRunning) R.string.tool_title_running_agent_mode_steps else R.string.tool_title_ran_agent_mode_steps,
+        )
         "key" -> formatArgumentDrivenTitle(
             isRunning = isRunning,
             progressiveVerb = context.getString(R.string.tool_title_pressing),
