@@ -147,6 +147,7 @@ class AetherSelfManagementTool(
                                 listOf(
                                     "inspect_authorization",
                                     "set_authorization",
+                                    "set_perception",
                                     "refresh_authorization",
                                     "request_shizuku_permission",
                                     "stop_display",
@@ -530,6 +531,24 @@ class AetherSelfManagementTool(
                 }
             }
 
+            "set_perception" -> {
+                val updated = current.copy(
+                    agentModePerception = arguments.optString("perception").trim()
+                        .takeIf(String::isNotBlank)
+                        ?.let {
+                            AgentModePerception.fromStorage(
+                                it,
+                                defaultValue = current.agentModePerception,
+                            )
+                        }
+                        ?: current.agentModePerception,
+                )
+                settingsRepository.updateAgentModePerception(updated.agentModePerception)
+                success(JSONObject().put("agent_mode", agentModeSettingsJson(updated))) {
+                    put("stdout", "Updated Agent Mode perception.")
+                }
+            }
+
             "refresh_authorization" -> {
                 agentModeController.refreshAuthorization(current)
                 success(JSONObject().put("agent_mode", agentModeSettingsJson(current))) {
@@ -797,6 +816,7 @@ class AetherSelfManagementTool(
         JSONObject()
             .put("authorization_enabled", settings.agentModeAuthorizationEnabled)
             .put("authorization_method", settings.agentModeAuthorizationMethod.storageValue)
+            .put("perception", settings.agentModePerception.storageValue)
             .put("authorization", agentModeAuthorizationStateJson(agentModeController.authorizationState.value))
             .put("display", agentModeDisplayStateJson(agentModeController.displayState.value))
 

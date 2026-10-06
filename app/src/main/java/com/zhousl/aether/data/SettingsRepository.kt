@@ -154,6 +154,7 @@ class SettingsRepository(
                 preferences[AGENT_MODE_AUTHORIZATION_METHOD],
                 defaultValue = defaultAgentModeAuthorizationMethod(context),
             ),
+            agentModePerception = AgentModePerception.fromStorage(preferences[AGENT_MODE_PERCEPTION]),
             language = AppLanguage.fromStorage(preferences[LANGUAGE]),
             themeMode = AppThemeMode.fromStorage(preferences[THEME_MODE]),
             defaultChatModelKey = preferences[DEFAULT_CHAT_MODEL_KEY].orEmpty(),
@@ -453,6 +454,7 @@ class SettingsRepository(
                 serializeAlpineEnvironmentVariables(settings.alpineEnvironmentVariables)
             it[AGENT_MODE_AUTHORIZATION_ENABLED] = settings.agentModeAuthorizationEnabled
             it[AGENT_MODE_AUTHORIZATION_METHOD] = settings.agentModeAuthorizationMethod.storageValue
+            it[AGENT_MODE_PERCEPTION] = settings.agentModePerception.storageValue
             it[LANGUAGE] = settings.language.storageValue
             it[THEME_MODE] = settings.themeMode.storageValue
             it[DEFAULT_CHAT_MODEL_KEY] = settings.defaultChatModelKey
@@ -525,6 +527,12 @@ class SettingsRepository(
         context.dataStore.edit {
             it[AGENT_MODE_AUTHORIZATION_ENABLED] = enabled
             it[AGENT_MODE_AUTHORIZATION_METHOD] = method.storageValue
+        }
+    }
+
+    suspend fun updateAgentModePerception(perception: AgentModePerception) {
+        context.dataStore.edit {
+            it[AGENT_MODE_PERCEPTION] = perception.storageValue
         }
     }
 
@@ -681,6 +689,8 @@ class SettingsRepository(
             booleanPreferencesKey("agent_mode_authorization_enabled")
         val AGENT_MODE_AUTHORIZATION_METHOD =
             stringPreferencesKey("agent_mode_authorization_method")
+        val AGENT_MODE_PERCEPTION =
+            stringPreferencesKey("agent_mode_perception")
         val LANGUAGE = stringPreferencesKey("language")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val DEFAULT_CHAT_MODEL_KEY = stringPreferencesKey("default_chat_model_key")

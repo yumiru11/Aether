@@ -251,6 +251,13 @@
     <string name="settings_agent_mode_method_shizuku_subtitle">Uses an elevated Shizuku service.</string>
     <string name="settings_agent_mode_method_root_subtitle">Uses root shell for privileged input.</string>
     <string name="settings_agent_mode_method_description">Shizuku mode creates the display from a Shizuku user service so apps can render off the main screen. Root mode remains experimental.</string>
+    <string name="settings_agent_mode_perception">Interface perception</string>
+    <string name="settings_agent_mode_perception_description">Chooses what the model is shown after every action. Interface elements carry the text and the exact bounds of each control, so tapping one does not depend on reading a coordinate off a scaled image.</string>
+    <string name="settings_agent_mode_perception_elements_with_screenshot">Elements + screenshot</string>
+    <string name="settings_agent_mode_perception_elements_with_screenshot_subtitle">Reads interface elements first; when they cannot be read on this device, says why and falls back to a screenshot.</string>
+    <string name="settings_agent_mode_perception_elements">Elements only</string>
+    <string name="settings_agent_mode_perception_elements_subtitle">Reads interface elements only. A screenshot is taken only when the model asks for one.</string>
+
     <string name="settings_virtual_display">Virtual Display</string>
     <string name="settings_agent_mode_display_active">Display %1$s is active at %2$d x %3$d.</string>
     <string name="settings_agent_mode_no_virtual_display">No Agent Mode virtual display is active.</string>
@@ -780,6 +787,16 @@
     <string name="tool_title_typed_agent_mode">Typed in Agent Mode</string>
     <string name="tool_title_capturing_agent_mode_display">Capturing Agent Mode display</string>
     <string name="tool_title_captured_agent_mode_display">Captured Agent Mode display</string>
+    <string name="tool_title_reading_agent_mode_elements">Reading interface elements</string>
+    <string name="tool_title_read_agent_mode_elements">Read interface elements</string>
+    <string name="tool_title_long_pressing_agent_mode_display">Long pressing the Agent Mode display</string>
+    <string name="tool_title_long_pressed_agent_mode_display">Long pressed the Agent Mode display</string>
+    <string name="tool_title_scrolling_agent_mode_display">Scrolling the Agent Mode display</string>
+    <string name="tool_title_scrolled_agent_mode_display">Scrolled the Agent Mode display</string>
+    <string name="tool_title_waiting_agent_mode">Waiting for the Agent Mode display</string>
+    <string name="tool_title_waited_agent_mode">Waited for the Agent Mode display</string>
+    <string name="tool_title_running_agent_mode_steps">Running Agent Mode steps</string>
+    <string name="tool_title_ran_agent_mode_steps">Ran Agent Mode steps</string>
     <string name="tool_title_using_agent_mode_display">Using Agent Mode display</string>
     <string name="tool_title_used_agent_mode_display">Used Agent Mode display</string>
     <string name="tool_title_starting_chrome">Starting Chrome</string>

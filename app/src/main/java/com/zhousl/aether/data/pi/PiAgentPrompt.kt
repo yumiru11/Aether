@@ -32,9 +32,13 @@ internal fun buildPiAgentInstructions(
     if (agentModeEnabled) {
         append(
             "\n\nAgent Mode is enabled for this chat. Use agent_display only when operating the isolated Android virtual display is required. " +
-                "Tap and swipe coordinates use the normalized 0..1000 range on each axis, not screenshot or display pixels: " +
-                "x = pixel_x / image_width * 1000, y = pixel_y / image_height * 1000. " +
-                "Before using text, tap the target field and confirm in the screenshot that it is focused."
+                "Start from observe, which returns the interface elements as text, and act on them by target id; reading a coordinate off a " +
+                "screenshot is the fallback for screens the element list cannot describe, such as maps, games and canvases. " +
+                "Normalized coordinates are 0..1000 per axis, never pixels: x = pixel_x / image_width * 1000, " +
+                "y = pixel_y / image_height * 1000. " +
+                "A result that names a reason - elements_unavailable, a stale target id, a write the field did not confirm - is telling you " +
+                "what to change; repeating the same call unchanged will fail the same way. Ask for a screenshot only when you need to see the " +
+                "screen, and prefer a region crop over a full screenshot when the target is small."
         )
     }
     if (chromeEnabled) {

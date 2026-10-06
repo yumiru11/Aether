@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Point
+import android.graphics.Rect
 import android.hardware.display.DisplayManager
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
@@ -12,8 +13,10 @@ import android.util.Base64
 import android.view.Display
 import android.view.Surface
 import androidx.core.content.getSystemService
+import com.zhousl.aether.agentmode.AgentModeLaunchSettleTimeoutMillis
 import com.zhousl.aether.agentmode.AgentModeServiceHandle
 import com.zhousl.aether.agentmode.AgentModeServiceLauncher
+import com.zhousl.aether.agentmode.AgentModeSettleTimeoutMillis
 import com.zhousl.aether.agentmode.IAetherAgentModeService
 import com.zhousl.aether.termux.TermuxBashTool
 import java.io.File
@@ -43,7 +46,35 @@ private const val AgentModeCaptureMimeType = "image/jpeg"
 private const val AgentModeCaptureMaxEdge = 1280
 private const val AgentModeCoordinateSpace = "normalized_0_1000"
 private const val AgentModeCaptureJpegQuality = 85
+
+/**
+ * Quality for a cropped capture. A crop is small, so the extra bytes cost little, and the extra
+ * sharpness is exactly what a coordinate read off the image depends on.
+ */
+private const val AgentModeCaptureRegionJpegQuality = 92
+private const val AgentModeDefaultWaitTimeoutMillis = 5_000
+private const val AgentModeMaxWaitTimeoutMillis = 60_000
+private const val AgentModeWaitPollIntervalMillis = 150L
+private const val AgentModeDefaultScrollSteps = 6
+private const val AgentModeScrollStepDelayMillis = 120L
+private const val AgentModeMaxBatchSteps = 20
 private const val ShizukuPermissionRequestCode = 4201
+
+/**
+ * Steps a batch may contain. Every step is validated before the first one runs, so a typo in the last
+ * entry cannot leave the device half-way through a sequence.
+ */
+private val AgentModeBatchStepActions = setOf(
+    "observe",
+    "tap",
+    "long_press",
+    "text",
+    "scroll",
+    "key",
+    "swipe",
+    "launch",
+    "wait",
+)
 private const val RootAuthorizationProbeTimeoutMillis = 2_000L
 private const val AgentModeServiceStartTimeoutMillis = 20_000L
 
@@ -227,11 +258,13 @@ class AgentModeController(
             when (action) {
             "start" -> {
                 ensureDisplay(settings)
-                captureAfterDelay(
-                    settings,
-                    workspaceDirectory,
-                    termuxWorkspaceDirectory,
-                    delayMillis = 350,
+                observeResult(
+                    settings = settings,
+                    workspaceDirectory = workspaceDirectory,
+                    termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                    arguments = arguments,
+                    settleTimeoutMillis = AgentModeSettleTimeoutMillis,
+                    fallbackDelayMillis = 350,
                 )
             }
             "status" -> statusResult(settings)
@@ -243,31 +276,36 @@ class AgentModeController(
                     invalidArguments("Missing required 'target' argument.")
                 } else {
                     launchTarget(settings, target)
-                    captureAfterDelay(
-                        settings,
-                        workspaceDirectory,
-                        termuxWorkspaceDirectory,
-                        delayMillis = 900,
+                    observeResult(
+                        settings = settings,
+                        workspaceDirectory = workspaceDirectory,
+                        termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                        arguments = arguments,
+                        settleTimeoutMillis = AgentModeLaunchSettleTimeoutMillis,
+                        fallbackDelayMillis = 900,
                     )
                 }
             }
-            "tap" -> {
-                val displayId = ensureDisplay(settings)
-                when (val point = resolvePoint(arguments, "x", "y")) {
-                    is ResolvedPoint.Invalid -> invalidArguments(point.message)
-                    is ResolvedPoint.Valid -> {
-                        requireAgentModeService(settings).tap(displayId, point.x, point.y)
-                        updateCursorPosition(point.x, point.y, animationDurationMillis = 180)
-                        captureAfterDelay(
-                            settings,
-                            workspaceDirectory,
-                            termuxWorkspaceDirectory,
-                            delayMillis = 350,
-                            extras = focusExtras(settings, displayId),
-                        )
-                    }
-                }
-            }
+            "observe" -> observeResult(
+                settings = settings,
+                workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                arguments = arguments,
+            )
+            "tap" -> gestureResult(
+                settings = settings,
+                workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                arguments = arguments,
+                longPress = false,
+            )
+            "long_press" -> gestureResult(
+                settings = settings,
+                workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                arguments = arguments,
+                longPress = true,
+            )
             "swipe" -> {
                 val displayId = ensureDisplay(settings)
                 val start = resolvePoint(arguments, "x1", "y1")
@@ -284,16 +322,25 @@ class AgentModeController(
                             updateCursorPosition(end.x, end.y, animationDurationMillis = durationMs)
                         }
                         requireAgentModeService(settings).swipe(displayId, start.x, start.y, end.x, end.y, durationMs)
-                        captureAfterDelay(
-                            settings,
-                            workspaceDirectory,
-                            termuxWorkspaceDirectory,
+                        perceive(
+                            settings = settings,
+                            workspaceDirectory = workspaceDirectory,
+                            termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                            arguments = arguments,
+                            base = actionSucceeded("swipe"),
+                            settleTimeoutMillis = AgentModeSettleTimeoutMillis,
                             delayMillis = durationMs.toLong() + 250,
                         )
                     }
                     else -> invalidArguments("x1, y1, x2, and y2 are required.")
                 }
             }
+            "scroll" -> scrollResult(
+                settings = settings,
+                workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                arguments = arguments,
+            )
             "key" -> {
                 val displayId = ensureDisplay(settings)
                 val keyCode = arguments.optString("key").trim()
@@ -301,49 +348,41 @@ class AgentModeController(
                     invalidArguments("Missing required 'key' argument.")
                 } else {
                     requireAgentModeService(settings).key(displayId, keyCode)
-                    captureAfterDelay(
-                        settings,
-                        workspaceDirectory,
-                        termuxWorkspaceDirectory,
+                    perceive(
+                        settings = settings,
+                        workspaceDirectory = workspaceDirectory,
+                        termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                        arguments = arguments,
+                        base = actionSucceeded("key"),
+                        settleTimeoutMillis = AgentModeSettleTimeoutMillis,
                         delayMillis = 300,
                     )
                 }
             }
-            "text" -> {
-                val displayId = ensureDisplay(settings)
-                val text = arguments.optString("text")
-                if (text.isBlank()) {
-                    invalidArguments("Missing required 'text' argument.")
-                } else {
-                    val focus = focusExtras(settings, displayId)
-                    // Only refuse when the focus state was actually read and is empty; unknown focus falls through.
-                    if (focus.has("focused_window") && focus.optString("focused_window").isBlank()) {
-                        toolError(
-                            message = "No window on Agent Mode display $displayId has input focus, so the text would be dropped. " +
-                                "Tap the text field first, then check the screenshot for a cursor or focused field.",
-                            action = action,
-                        )
-                    } else {
-                        val method = requireAgentModeService(settings).text(displayId, text)
-                        captureAfterDelay(
-                            settings,
-                            workspaceDirectory,
-                            termuxWorkspaceDirectory,
-                            delayMillis = 350,
-                            extras = focus.put("text_input_method", method.orEmpty()),
-                        )
-                    }
-                }
-            }
-            "screenshot" -> {
-                ensureDisplay(settings)
-                captureAfterDelay(
-                    settings,
-                    workspaceDirectory,
-                    termuxWorkspaceDirectory,
-                    delayMillis = 0,
-                )
-            }
+            "text" -> textResult(
+                settings = settings,
+                workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                arguments = arguments,
+            )
+            "wait" -> waitResult(
+                settings = settings,
+                workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                arguments = arguments,
+            )
+            "batch" -> batchResult(
+                settings = settings,
+                workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                arguments = arguments,
+            )
+            "screenshot" -> screenshotResult(
+                settings = settings,
+                workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                arguments = arguments,
+            )
             "stop" -> {
                 releaseDisplay()
                 JSONObject().apply {
@@ -730,17 +769,25 @@ class AgentModeController(
         }
     }
 
-    private suspend fun captureAfterDelay(
+    /**
+     * Captures the display (or one rectangle of it) and returns the fields a result carries.
+     *
+     * A crop reports its own origin and scale, so converting a pixel read off the delivered image back
+     * into a device coordinate is one addition and one multiplication rather than a guess: the whole
+     * point of cropping is that the scale factor stops being a source of error.
+     */
+    private suspend fun captureFields(
         settings: AppSettings,
         workspaceDirectory: String,
         termuxWorkspaceDirectory: String,
         delayMillis: Long,
-        extras: JSONObject? = null,
-    ): String {
+        region: Rect?,
+        quality: Int,
+    ): JSONObject {
         if (delayMillis > 0) delay(delayMillis)
-        val captureId = "capture-${System.currentTimeMillis()}"
+        val captureId = "capture-" + System.currentTimeMillis()
         val previewFile = File(cacheDirectory, "$captureId.$AgentModeCaptureExtension")
-        captureImageFile(settings, previewFile)
+        captureImageFile(settings, previewFile, region, quality)
         if (!previewFile.isFile || previewFile.length() <= 0L) {
             error("Agent Mode screenshot capture produced an empty file.")
         }
@@ -772,12 +819,33 @@ class AgentModeController(
             put("display_id", displayId)
             put("width", state.width)
             put("height", state.height)
-            val (imageWidth, imageHeight) = agentModeScreenshotSize(state.width, state.height, AgentModeCaptureMaxEdge)
+            val captureWidth = region?.width()?.takeIf { it > 0 } ?: state.width
+            val captureHeight = region?.height()?.takeIf { it > 0 } ?: state.height
+            val (imageWidth, imageHeight) = agentModeScreenshotSize(
+                captureWidth,
+                captureHeight,
+                AgentModeCaptureMaxEdge,
+            )
             put("image_width", imageWidth)
             put("image_height", imageHeight)
             put("coordinate_space", AgentModeCoordinateSpace)
             put("screenshot_path", workspacePath)
             put("preview_path", previewPath)
+            put("screenshot_max_edge", AgentModeCaptureMaxEdge)
+            put("screenshot_quality", quality)
+            if (region != null) {
+                val scaleX = if (imageWidth > 0) captureWidth.toDouble() / imageWidth.toDouble() else 1.0
+                val scaleY = if (imageHeight > 0) captureHeight.toDouble() / imageHeight.toDouble() else 1.0
+                put("screenshot_region", regionText(region))
+                put("screenshot_scale_x", scaleX)
+                put("screenshot_scale_y", scaleY)
+                put(
+                    "screenshot_hint",
+                    "Inside this crop: device_x = " + region.left + " + image_x * " + formatScale(scaleX) +
+                        ", device_y = " + region.top + " + image_y * " + formatScale(scaleY) +
+                        ". image_width/image_height are the size of the image you were given.",
+                )
+            }
             // cursor_x/cursor_y are display pixels (kept for the UI); cursor_norm_* are the 0..1000 values to reuse.
             state.cursorX?.let {
                 put("cursor_x", it)
@@ -787,11 +855,23 @@ class AgentModeController(
                 put("cursor_y", it)
                 put("cursor_norm_y", normalizeAgentModePixel(it, state.height))
             }
-            extras?.keys()?.forEach { key -> put(key, extras.get(key)) }
             put("screenshot_mime_type", AgentModeCaptureMimeType)
             put("screenshot_base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
             put("stdout", "Captured Agent Mode screenshot: $workspacePath")
-        }.toString()
+        }
+    }
+
+    private fun regionText(region: Rect): String =
+        region.left.toString() + ',' + region.top + ',' + region.right + ',' + region.bottom
+
+    /** Trims a scale factor so a conversion hint reads as "2" rather than "2.0000000001". */
+    private fun formatScale(value: Double): String {
+        val rounded = Math.round(value * 10_000.0) / 10_000.0
+        return if (rounded == rounded.toLong().toDouble()) {
+            rounded.toLong().toString()
+        } else {
+            rounded.toString()
+        }
     }
 
     private fun updateCursorPosition(
@@ -811,6 +891,8 @@ class AgentModeController(
     private suspend fun captureImageFile(
         settings: AppSettings,
         outputFile: File,
+        region: Rect? = null,
+        quality: Int = AgentModeCaptureJpegQuality,
     ) {
         val displayId = ensureDisplay(settings)
         captureMutex.withLock {
@@ -823,12 +905,25 @@ class AgentModeController(
                         ParcelFileDescriptor.MODE_WRITE_ONLY or
                         ParcelFileDescriptor.MODE_TRUNCATE,
                 ).use { descriptor ->
-                    requireAgentModeService(settings).captureImageToFd(
-                        displayId,
-                        descriptor,
-                        AgentModeCaptureMaxEdge,
-                        AgentModeCaptureJpegQuality,
-                    )
+                    if (region == null) {
+                        requireAgentModeService(settings).captureImageToFd(
+                            displayId,
+                            descriptor,
+                            AgentModeCaptureMaxEdge,
+                            quality,
+                        )
+                    } else {
+                        requireAgentModeService(settings).captureRegionToFd(
+                            displayId,
+                            descriptor,
+                            AgentModeCaptureMaxEdge,
+                            quality,
+                            region.left,
+                            region.top,
+                            region.right,
+                            region.bottom,
+                        )
+                    }
                 }
             } catch (throwable: Throwable) {
                 runCatching { outputFile.delete() }
@@ -1335,6 +1430,756 @@ class AgentModeController(
     private suspend fun focusExtras(settings: AppSettings, displayId: Int): JSONObject {
         val raw = runCatching { requireAgentModeService(settings).focusedWindowJson(displayId) }.getOrNull()
         return runCatching { JSONObject(raw.orEmpty()) }.getOrElse { JSONObject() }
+    }
+
+    // ── Perception and element-targeted actions ──────────────────────────────
+
+    private fun actionSucceeded(action: String): JSONObject = JSONObject().apply {
+        put("ok", true)
+        put("action", action)
+    }
+
+    private fun stepFailure(message: String): JSONObject = JSONObject().apply {
+        put("ok", false)
+        put("errmsg", message)
+    }
+
+    /** The reason the element channel cannot serve this display, or null when the call was served. */
+    private fun JSONObject.elementsUnavailable(): String? =
+        optString("elements_unavailable").takeIf { it.isNotBlank() && !optBoolean("ok") }
+
+    /** Options handed to the privileged service for one observation. */
+    private fun elementObserveOptions(arguments: JSONObject): JSONObject = JSONObject().apply {
+        arguments.optString("query").takeIf { it.isNotBlank() }?.let { put("query", it) }
+        arguments.optString("region").takeIf { it.isNotBlank() }?.let { put("region", it) }
+        if (arguments.has("max_elements")) put("max_elements", arguments.optInt("max_elements"))
+        if (arguments.has("interactive_only")) {
+            put("interactive_only", arguments.optBoolean("interactive_only"))
+        }
+    }
+
+    private suspend fun observeElements(
+        settings: AppSettings,
+        displayId: Int,
+        options: JSONObject,
+    ): JSONObject? {
+        val raw = runCatching {
+            requireAgentModeService(settings).observeElementsJson(displayId, options.toString())
+        }.getOrNull() ?: return null
+        return runCatching { JSONObject(raw) }.getOrNull()
+    }
+
+    private suspend fun elementAction(
+        settings: AppSettings,
+        displayId: Int,
+        request: JSONObject,
+    ): JSONObject? {
+        val raw = runCatching {
+            requireAgentModeService(settings).elementActionJson(displayId, request.toString())
+        }.getOrNull() ?: return null
+        return runCatching { JSONObject(raw) }.getOrNull()
+    }
+
+    private suspend fun settleElements(
+        settings: AppSettings,
+        displayId: Int,
+        timeoutMillis: Long,
+    ): JSONObject? {
+        val raw = runCatching {
+            requireAgentModeService(settings).settleJson(
+                displayId,
+                JSONObject().put("timeout_ms", timeoutMillis).toString(),
+            )
+        }.getOrNull() ?: return null
+        return runCatching { JSONObject(raw) }.getOrNull()
+    }
+
+    /**
+     * Turns an action outcome into the tool result and applies the perception policy.
+     *
+     * Elements are the default channel and an image is attached only when the model asked for one.
+     * When the element channel cannot serve this display the reason travels with the result, and
+     * unless the user chose element-only perception a screenshot is attached as well: the rule this
+     * implements is that a fallback has to be *stated*, not that it must never happen.
+     */
+    private suspend fun perceive(
+        settings: AppSettings,
+        workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
+        arguments: JSONObject,
+        base: JSONObject,
+        unavailableReason: String? = null,
+        settleTimeoutMillis: Long? = null,
+        delayMillis: Long = 0L,
+    ): String {
+        val displayId = currentManagedDisplayId(settings)
+        displayId?.let { base.put("display_id", it) }
+        if (unavailableReason != null) {
+            base.put("elements_unavailable", unavailableReason)
+        }
+        if (settleTimeoutMillis != null && displayId != null && unavailableReason == null) {
+            settleElements(settings, displayId, settleTimeoutMillis)
+                ?.takeIf { it.optBoolean("ok") }
+                ?.let { settle ->
+                    base.put("settled", settle.optBoolean("settled"))
+                    base.put("settle_ms", settle.optLong("elapsed_ms"))
+                }
+        }
+
+        val screenshotRequested = arguments.optBoolean("screenshot", false)
+        val fallbackAllowed = unavailableReason != null &&
+            settings.agentModePerception == AgentModePerception.ElementsWithScreenshot
+        base.put(
+            "perception",
+            when {
+                screenshotRequested -> "screenshot"
+                fallbackAllowed -> "screenshot_fallback"
+                unavailableReason != null -> "elements_unavailable"
+                else -> "elements"
+            },
+        )
+        if (displayId != null && (screenshotRequested || fallbackAllowed)) {
+            val fields = captureFields(
+                settings = settings,
+                workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                delayMillis = if (unavailableReason == null) 0L else delayMillis,
+                region = null,
+                quality = AgentModeCaptureJpegQuality,
+            )
+            fields.keys().forEach { key ->
+                if (key != "ok") base.put(key, fields.get(key))
+            }
+        }
+        return base.toString()
+    }
+
+    /**
+     * Reads the element list, or a screenshot when the element channel cannot serve the display.
+     *
+     * `start` and `launch` go through here rather than returning a bare status: showing the screen
+     * that resulted is the whole point of both, and folding it into the same call is what keeps a task
+     * from spending its first two round trips on "start" and then "look".
+     */
+    private suspend fun observeResult(
+        settings: AppSettings,
+        workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
+        arguments: JSONObject,
+        settleTimeoutMillis: Long? = null,
+        fallbackDelayMillis: Long = 0L,
+    ): String {
+        val displayId = ensureDisplay(settings)
+        val base = JSONObject()
+        if (settleTimeoutMillis != null) {
+            settleElements(settings, displayId, settleTimeoutMillis)
+                ?.takeIf { it.optBoolean("ok") }
+                ?.let { settle ->
+                    base.put("settled", settle.optBoolean("settled"))
+                    base.put("settle_ms", settle.optLong("elapsed_ms"))
+                }
+        }
+        val outcome = observeElements(settings, displayId, elementObserveOptions(arguments))
+        val unavailableReason = outcome?.elementsUnavailable()
+            ?: if (outcome == null) "service_unavailable" else null
+        if (outcome != null) {
+            outcome.keys().forEach { key ->
+                if (key != "ok") base.put(key, outcome.get(key))
+            }
+        } else {
+            base.put("errmsg", "The Agent Mode service did not answer the element read.")
+        }
+        if (unavailableReason != null && settings.agentModePerception == AgentModePerception.ElementsWithScreenshot) {
+            // The read itself is served, by a screenshot; the reason travels with it.
+            base.put("ok", true)
+            base.remove("errmsg")
+        } else {
+            base.put("ok", outcome != null && outcome.optBoolean("ok"))
+        }
+        return perceive(
+            settings = settings,
+            workspaceDirectory = workspaceDirectory,
+            termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+            arguments = arguments,
+            base = base,
+            unavailableReason = unavailableReason,
+            delayMillis = fallbackDelayMillis,
+        )
+    }
+
+    /**
+     * Taps or long-presses an element, or a normalized coordinate when the model gave one.
+     *
+     * The coordinate form stays exactly as it was: it is the fallback for canvas-like screens the
+     * element tree says nothing useful about, and the answer now names what the point landed on.
+     */
+    /** A gesture request that is ready to send, or the reason the arguments could not be turned into one. */
+    private sealed interface ElementGestureRequest {
+        data class Ready(
+            val request: JSONObject,
+            /** Set when the model gave normalized coordinates rather than an element id. */
+            val devicePoint: ResolvedPoint.Valid?,
+        ) : ElementGestureRequest
+
+        data class Invalid(val message: String) : ElementGestureRequest
+    }
+
+    /**
+     * Builds a tap or long-press request from either form of target.
+     *
+     * Shared with the batch dispatcher so a step and a direct call accept exactly the same arguments and
+     * fail with exactly the same message; only the coordinate form needs the display extent, and the
+     * conversion happens once, here.
+     */
+    private fun buildGestureRequest(source: JSONObject, action: String): ElementGestureRequest {
+        val request = JSONObject().apply {
+            put("kind", action)
+            put("via", source.optString("via").trim().ifBlank { "touch" })
+            if (source.has("duration_ms")) put("duration_ms", source.optInt("duration_ms"))
+            if (source.has("settle_timeout_ms")) {
+                put("settle_timeout_ms", source.optLong("settle_timeout_ms"))
+            }
+        }
+        val targetId = source.optInt("target", source.optInt("target_id", 0))
+        if (targetId > 0) {
+            request.put("target_id", targetId)
+            return ElementGestureRequest.Ready(request = request, devicePoint = null)
+        }
+        return when (val point = resolvePoint(source, "x", "y")) {
+            is ResolvedPoint.Invalid -> ElementGestureRequest.Invalid(point.message)
+            is ResolvedPoint.Valid -> {
+                request.put("x", point.x)
+                request.put("y", point.y)
+                ElementGestureRequest.Ready(request = request, devicePoint = point)
+            }
+        }
+    }
+
+    private suspend fun gestureResult(
+        settings: AppSettings,
+        workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
+        arguments: JSONObject,
+        longPress: Boolean,
+    ): String {
+        val displayId = ensureDisplay(settings)
+        val action = if (longPress) "long_press" else "tap"
+        val built = when (val candidate = buildGestureRequest(arguments, action)) {
+            is ElementGestureRequest.Invalid -> return invalidArguments(candidate.message)
+            is ElementGestureRequest.Ready -> candidate
+        }
+        val request = built.request
+        val devicePoint = built.devicePoint
+        val targetId = request.optInt("target_id", 0)
+
+        val answered = elementAction(settings, displayId, request)
+        var unavailableReason = answered?.elementsUnavailable()
+        val outcome: JSONObject = if (answered != null) {
+            answered
+        } else {
+            val point = devicePoint
+            if (point == null) {
+                return toolError(
+                    message = "Element $targetId could not be resolved: the element channel did not answer.",
+                    action = action,
+                )
+            }
+            if (longPress) {
+                // There is no long-press entry point outside the element channel, so this is reported
+                // rather than downgraded to a tap the model did not ask for.
+                return toolError(
+                    message = "A long press at a coordinate needs the element channel, which did not answer.",
+                    action = action,
+                )
+            }
+            requireAgentModeService(settings).tap(displayId, point.x, point.y)
+            unavailableReason = "service_unavailable"
+            actionSucceeded(action)
+        }
+
+        val reportedX = outcome.takeIf { it.has("point_x") }?.optInt("point_x")
+        val reportedY = outcome.takeIf { it.has("point_y") }?.optInt("point_y")
+        when {
+            reportedX != null && reportedY != null ->
+                updateCursorPosition(reportedX, reportedY, animationDurationMillis = 180)
+
+            devicePoint != null -> {
+                val point = devicePoint
+                updateCursorPosition(point.x, point.y, animationDurationMillis = 180)
+            }
+        }
+
+        return perceive(
+            settings = settings,
+            workspaceDirectory = workspaceDirectory,
+            termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+            arguments = arguments,
+            base = outcome,
+            unavailableReason = unavailableReason,
+            delayMillis = 350,
+        )
+    }
+
+    /**
+     * Writes text and reports whether the field confirmed it.
+     *
+     * The element path writes through the field's own action and reads it back. Only when the element
+     * channel cannot serve the display does the write fall back to the focused field and the input
+     * methods that existed before, and the result says which one was used.
+     */
+    private suspend fun textResult(
+        settings: AppSettings,
+        workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
+        arguments: JSONObject,
+    ): String {
+        val displayId = ensureDisplay(settings)
+        val text = arguments.optString("text")
+        if (text.isBlank()) {
+            return invalidArguments("Missing required 'text' argument.")
+        }
+        val targetId = arguments.optInt("target", arguments.optInt("target_id", 0))
+        val outcome = elementAction(
+            settings = settings,
+            displayId = displayId,
+            request = JSONObject().apply {
+                put("kind", "set_text")
+                put("text", text)
+                if (targetId > 0) put("target_id", targetId)
+                if (arguments.optBoolean("submit", false)) put("submit", true)
+            },
+        )
+        if (outcome != null && outcome.elementsUnavailable() == null) {
+            return perceive(
+                settings = settings,
+                workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                arguments = arguments,
+                base = outcome,
+            )
+        }
+
+        val focus = focusExtras(settings, displayId)
+        // Only refuse when the focus state was actually read and is empty; unknown focus falls through.
+        if (focus.has("focused_window") && focus.optString("focused_window").isBlank()) {
+            return toolError(
+                message = "No window on Agent Mode display $displayId has input focus, so the text would be dropped. " +
+                    "Tap the text field first, then check the screenshot for a cursor or focused field.",
+                action = "text",
+            )
+        }
+        val method = requireAgentModeService(settings).text(displayId, text)
+        val base = actionSucceeded("text")
+        base.put("method", method.orEmpty())
+        base.put("text_verification", "unverified")
+        base.put("text_verification_note", "The legacy input path does not read the field back.")
+        focus.keys().forEach { key -> base.put(key, focus.get(key)) }
+        return perceive(
+            settings = settings,
+            workspaceDirectory = workspaceDirectory,
+            termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+            arguments = arguments,
+            base = base,
+            unavailableReason = outcome?.elementsUnavailable() ?: "service_unavailable",
+            delayMillis = 350,
+        )
+    }
+
+    /**
+     * Scrolls one step, optionally until a piece of text shows up.
+     *
+     * The repeat loop lives here rather than in the model's step budget: "scroll until the entry is
+     * visible" is one intention, and paying a round trip per scroll is what made long lists expensive.
+     */
+    private suspend fun scrollResult(
+        settings: AppSettings,
+        workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
+        arguments: JSONObject,
+    ): String {
+        val displayId = ensureDisplay(settings)
+        val direction = arguments.optString("direction", "down").trim().ifBlank { "down" }
+        val until = arguments.optString("until").trim()
+        val maxSteps = arguments.optInt("max_steps", AgentModeDefaultScrollSteps).coerceIn(1, 30)
+        val targetId = arguments.optInt("target", arguments.optInt("target_id", 0))
+
+        var outcome: JSONObject? = null
+        var steps = 0
+        var reached = until.isEmpty()
+        var unavailableReason: String? = null
+        while (steps < maxSteps) {
+            outcome = elementAction(
+                settings = settings,
+                displayId = displayId,
+                request = JSONObject().apply {
+                    put("kind", "scroll")
+                    put("direction", direction)
+                    if (targetId > 0) put("target_id", targetId)
+                },
+            )
+            steps++
+            unavailableReason = outcome?.elementsUnavailable()
+                ?: if (outcome == null) "service_unavailable" else null
+            if (until.isEmpty() || unavailableReason != null) break
+            val observation = observeElements(settings, displayId, JSONObject().put("query", until))
+            if (observation != null && observation.optInt("total") > 0) {
+                reached = true
+                break
+            }
+            if (outcome?.optBoolean("ok") != true) break
+            delay(AgentModeScrollStepDelayMillis)
+        }
+
+        val base = outcome ?: stepFailure("The scroll request did not answer.")
+        base.put("action", "scroll")
+        base.put("direction", direction)
+        base.put("steps", steps)
+        if (until.isNotEmpty()) {
+            base.put("until", until)
+            base.put("until_found", reached)
+            if (!reached && unavailableReason == null) {
+                base.put("ok", false)
+                base.put("errmsg", "Scrolled $steps step(s) without finding \"$until\".")
+            }
+        }
+        return perceive(
+            settings = settings,
+            workspaceDirectory = workspaceDirectory,
+            termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+            arguments = arguments,
+            base = base,
+            unavailableReason = unavailableReason,
+        )
+    }
+
+    /**
+     * Waits for a condition, and says whether it was met.
+     *
+     * `until` accepts `settle` (the default), `text:<s>`, `gone:<s>` and `ms:<n>`. A wait that timed
+     * out reports that it timed out instead of returning success because time passed.
+     */
+    /**
+     * Polls until a text condition holds.
+     *
+     * Only text conditions are offered. Every action already waits for the screen to stop changing, so a
+     * "wait for settle" mode would only duplicate what the result reports, and an explicit sleep is not
+     * something a UI tool needs to provide. The same poller answers a batch wait step, so both forms of
+     * the condition mean exactly the same thing.
+     */
+    private suspend fun awaitTextCondition(
+        settings: AppSettings,
+        displayId: Int,
+        until: String,
+        timeoutMillis: Int,
+    ): JSONObject {
+        val gone = until.startsWith("gone:")
+        val needle = until.removePrefix(if (gone) "gone:" else "text:")
+        val startedAt = System.currentTimeMillis()
+        val deadline = startedAt + timeoutMillis
+        var unavailableReason: String? = null
+        while (true) {
+            val observation = observeElements(settings, displayId, JSONObject().put("query", needle))
+            unavailableReason = observation?.elementsUnavailable()
+                ?: if (observation == null) "service_unavailable" else null
+            if (observation != null && (observation.optInt("total") > 0) != gone) {
+                return JSONObject().apply {
+                    put("ok", true)
+                    put("condition", until)
+                    put("satisfied", true)
+                    put("elapsed_ms", System.currentTimeMillis() - startedAt)
+                }
+            }
+            if (unavailableReason != null || System.currentTimeMillis() >= deadline) break
+            delay(AgentModeWaitPollIntervalMillis)
+        }
+        return JSONObject().apply {
+            put("ok", false)
+            put("condition", until)
+            put("satisfied", false)
+            put("elapsed_ms", System.currentTimeMillis() - startedAt)
+            if (unavailableReason != null) {
+                put("elements_unavailable", unavailableReason)
+            } else {
+                put("errmsg", "Wait condition '$until' was not met within $timeoutMillis ms.")
+            }
+        }
+    }
+
+    private suspend fun waitResult(
+        settings: AppSettings,
+        workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
+        arguments: JSONObject,
+    ): String {
+        val displayId = ensureDisplay(settings)
+        val until = arguments.optString("until").trim()
+        if (!until.startsWith("text:") && !until.startsWith("gone:")) {
+            return invalidArguments(
+                "'until' must be \"text:<s>\" or \"gone:<s>\"; actions already wait for the screen to settle.",
+            )
+        }
+        val timeoutMillis = arguments.optInt("timeout_ms", AgentModeDefaultWaitTimeoutMillis)
+            .coerceIn(0, AgentModeMaxWaitTimeoutMillis)
+        val base = awaitTextCondition(settings, displayId, until, timeoutMillis)
+        base.put("action", "wait")
+        return perceive(
+            settings = settings,
+            workspaceDirectory = workspaceDirectory,
+            termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+            arguments = arguments,
+            base = base,
+            unavailableReason = base.optString("elements_unavailable").takeIf { it.isNotBlank() },
+        )
+    }
+
+    /**
+     * Runs a short sequence of steps in one call.
+     *
+     * Every step is validated before the first one runs, so a typo in a later entry cannot leave the
+     * device half-way through a sequence, and only a per-step summary plus the final observation come
+     * back, which is what keeps a multi-step interaction from costing a round trip per step.
+     */
+    private suspend fun batchResult(
+        settings: AppSettings,
+        workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
+        arguments: JSONObject,
+    ): String {
+        val steps = arguments.optJSONArray("steps")
+            ?: return invalidArguments("'steps' must be an array of agent_display calls.")
+        if (steps.length() == 0) {
+            return invalidArguments("'steps' must not be empty.")
+        }
+        if (steps.length() > AgentModeMaxBatchSteps) {
+            return invalidArguments("'steps' may hold at most $AgentModeMaxBatchSteps entries.")
+        }
+        val parsed = mutableListOf<JSONObject>()
+        for (index in 0 until steps.length()) {
+            val step = steps.optJSONObject(index)
+                ?: return invalidArguments("Step $index is not an object.")
+            val stepAction = step.optString("action").trim().lowercase()
+            if (stepAction.isBlank()) {
+                return invalidArguments("Step $index is missing 'action'.")
+            }
+            if (stepAction !in AgentModeBatchStepActions) {
+                return invalidArguments(
+                    "Step $index uses unsupported action '$stepAction'. Supported: " +
+                        AgentModeBatchStepActions.joinToString(", ") + ".",
+                )
+            }
+            parsed += step
+        }
+
+        val report = arguments.optString("report", "final").trim().lowercase()
+        val stopOnError = arguments.optBoolean("stop_on_error", true)
+        val summaries = JSONArray()
+        val observations = JSONArray()
+        var failedIndex = -1
+        var failureMessage = ""
+        var finalObservation: String? = null
+
+        for ((index, step) in parsed.withIndex()) {
+            val stepAction = step.optString("action").trim().lowercase()
+            val startedAt = System.currentTimeMillis()
+            val result = runCatching { executeBatchStep(settings, step, stepAction) }
+                .getOrElse { throwable ->
+                    stepFailure(throwable.message ?: throwable.javaClass.simpleName)
+                }
+            val ok = result.optBoolean("ok")
+            summaries.put(
+                JSONObject().apply {
+                    put("index", index)
+                    put("action", stepAction)
+                    put("ok", ok)
+                    put("ms", System.currentTimeMillis() - startedAt)
+                    if (!ok) put("errmsg", result.optString("errmsg").take(200))
+                },
+            )
+            if (ok && stepAction == "observe") {
+                when (report) {
+                    "each" -> observations.put(result.optString("stdout"))
+                    "none" -> Unit
+                    else -> finalObservation = result.optString("stdout").takeIf { it.isNotBlank() }
+                }
+            }
+            if (!ok) {
+                failedIndex = index
+                failureMessage = result.optString("errmsg")
+                if (stopOnError) break
+            }
+        }
+
+        val base = JSONObject().apply {
+            put("ok", failedIndex < 0)
+            put("action", "batch")
+            put("step_count", parsed.size)
+            put("steps", summaries)
+            if (failedIndex >= 0) {
+                put("failed_step", failedIndex)
+                put("errmsg", failureMessage)
+            }
+            when (report) {
+                "each" -> put("observations", observations)
+                "none" -> Unit
+                else -> finalObservation?.let { put("stdout", it) }
+            }
+        }
+        return perceive(
+            settings = settings,
+            workspaceDirectory = workspaceDirectory,
+            termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+            arguments = arguments,
+            base = base,
+        )
+    }
+
+    private suspend fun executeBatchStep(
+        settings: AppSettings,
+        step: JSONObject,
+        action: String,
+    ): JSONObject {
+        val displayId = ensureDisplay(settings)
+        return when (action) {
+            "observe" -> observeElements(settings, displayId, elementObserveOptions(step))
+                ?: stepFailure("The element read did not answer.")
+
+            "tap", "long_press" -> when (val built = buildGestureRequest(step, action)) {
+                is ElementGestureRequest.Invalid -> stepFailure(built.message)
+                is ElementGestureRequest.Ready ->
+                    elementAction(settings, displayId, built.request)
+                        ?: stepFailure("The gesture did not answer.")
+            }
+
+            "text" -> elementAction(
+                settings = settings,
+                displayId = displayId,
+                request = JSONObject().apply {
+                    put("kind", "set_text")
+                    put("text", step.optString("text"))
+                    step.optInt("target", step.optInt("target_id", 0))
+                        .takeIf { it > 0 }
+                        ?.let { put("target_id", it) }
+                    if (step.optBoolean("submit", false)) put("submit", true)
+                },
+            ) ?: stepFailure("The text write did not answer.")
+
+            "scroll" -> elementAction(
+                settings = settings,
+                displayId = displayId,
+                request = JSONObject().apply {
+                    put("kind", "scroll")
+                    put("direction", step.optString("direction", "down").trim().ifBlank { "down" })
+                    step.optInt("target", step.optInt("target_id", 0))
+                        .takeIf { it > 0 }
+                        ?.let { put("target_id", it) }
+                },
+            ) ?: stepFailure("The scroll did not answer.")
+
+            "key" -> {
+                val keyCode = step.optString("key").trim()
+                if (keyCode.isBlank()) {
+                    stepFailure("'key' is required for a batch key step.")
+                } else {
+                    requireAgentModeService(settings).key(displayId, keyCode)
+                    actionSucceeded("key")
+                }
+            }
+
+            "swipe" -> {
+                val start = resolvePoint(step, "x1", "y1")
+                val end = resolvePoint(step, "x2", "y2")
+                if (start !is ResolvedPoint.Valid || end !is ResolvedPoint.Valid) {
+                    stepFailure("A batch swipe needs x1, y1, x2 and y2.")
+                } else {
+                    requireAgentModeService(settings).swipe(
+                        displayId,
+                        start.x,
+                        start.y,
+                        end.x,
+                        end.y,
+                        step.optInt("duration_ms", 500).coerceIn(50, 10_000),
+                    )
+                    actionSucceeded("swipe")
+                }
+            }
+
+            "launch" -> {
+                val target = step.optString("target").trim()
+                if (target.isBlank()) {
+                    stepFailure("'target' is required for a batch launch step.")
+                } else {
+                    launchTarget(settings, target)
+                    actionSucceeded("launch")
+                }
+            }
+
+            "wait" -> {
+                val until = step.optString("until").trim()
+                if (!until.startsWith("text:") && !until.startsWith("gone:")) {
+                    stepFailure("A batch wait needs until=\"text:<s>\" or \"gone:<s>\".")
+                } else {
+                    awaitTextCondition(
+                        settings = settings,
+                        displayId = displayId,
+                        until = until,
+                        timeoutMillis = step.optInt("timeout_ms", AgentModeDefaultWaitTimeoutMillis)
+                            .coerceIn(0, AgentModeMaxWaitTimeoutMillis),
+                    ).apply { put("action", "wait") }
+                }
+            }
+
+            else -> stepFailure("Unsupported batch action '$action'.")
+        }
+    }
+
+    /**
+     * Captures the display, optionally one rectangle of it.
+     *
+     * A screenshot is an explicit request, so the perception policy does not apply: the model asked for
+     * an image and gets one. A cropped capture reports its own origin and scale, which is what turns a
+     * pixel read off the image into a device coordinate without guessing at a downscale factor.
+     */
+    private suspend fun screenshotResult(
+        settings: AppSettings,
+        workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
+        arguments: JSONObject,
+    ): String {
+        ensureDisplay(settings)
+        val rawRegion = arguments.optString("region").trim()
+        val region = if (rawRegion.isBlank()) null else parseRegionArgument(rawRegion)
+        if (rawRegion.isNotBlank() && region == null) {
+            return invalidArguments(
+                "'region' must be \"left,top,right,bottom\" inside the display, e.g. \"0,0,540,600\".",
+            )
+        }
+        val fields = captureFields(
+            settings = settings,
+            workspaceDirectory = workspaceDirectory,
+            termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+            delayMillis = 0L,
+            region = region,
+            quality = if (region == null) AgentModeCaptureJpegQuality else AgentModeCaptureRegionJpegQuality,
+        )
+        val base = actionSucceeded("screenshot")
+        fields.keys().forEach { key ->
+            if (key != "ok") base.put(key, fields.get(key))
+        }
+        base.put("perception", "screenshot")
+        return base.toString()
+    }
+
+    private fun parseRegionArgument(rawValue: String): Rect? {
+        val parts = rawValue.split(',').map { it.trim() }
+        if (parts.size != 4) return null
+        val values = parts.map { it.toIntOrNull() ?: return null }
+        val state = _displayState.value
+        if (state.width <= 0 || state.height <= 0) return null
+        val region = Rect(values[0], values[1], values[2], values[3])
+        if (region.width() <= 0 || region.height() <= 0) return null
+        if (region.left < 0 || region.top < 0) return null
+        if (region.right > state.width || region.bottom > state.height) return null
+        return region
     }
 
     private fun invalidArguments(message: String): String =

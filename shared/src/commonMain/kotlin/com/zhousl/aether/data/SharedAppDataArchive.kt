@@ -349,6 +349,7 @@ private fun AppSettings.toAndroidAppSettingsJson(): JsonObject = buildJsonObject
     put("oldCommandHistoryRetentionHours", oldCommandHistoryRetentionHours)
     put("agentModeAuthorizationEnabled", agentModeAuthorizationEnabled)
     put("agentModeAuthorizationMethod", agentModeAuthorizationMethod.storageValue)
+    put("agentModePerception", agentModePerception.storageValue)
     put("language", language.storageValue)
     put("themeMode", themeMode.storageValue)
     put("defaultChatModelKey", defaultChatModelKey)
@@ -449,6 +450,10 @@ private fun parseAndroidAppSettings(value: JsonObject): AppSettings {
         agentModeAuthorizationMethod = AgentModeAuthorizationMethod.fromStorage(
             value.stringValue("agentModeAuthorizationMethod"),
             defaults.agentModeAuthorizationMethod,
+        ),
+        agentModePerception = AgentModePerception.fromStorage(
+            value.stringValue("agentModePerception"),
+            defaults.agentModePerception,
         ),
         language = AppLanguage.fromStorage(value.stringValue("language"), defaults.language),
         themeMode = AppThemeMode.fromStorage(value.stringValue("themeMode")),

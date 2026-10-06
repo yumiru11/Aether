@@ -1078,6 +1078,7 @@ private fun AetherAppContent(
                     agentModeAuthorizationEnabled = uiState.settings.agentModeAuthorizationEnabled,
                     agentModeAuthorizationMethod = uiState.settings.agentModeAuthorizationMethod,
                     agentModeAuthorizationState = uiState.agentModeAuthorizationState,
+                    agentModePerception = uiState.settings.agentModePerception,
                     rootSetupState = uiState.rootSetupState,
                     rootSetupProgressReturnPage = uiState.rootSetupProgressReturnPage,
                     language = language,
@@ -1116,6 +1117,7 @@ private fun AetherAppContent(
                     onSave = viewModel::saveSettings,
                     onSaveDefaultModelKeys = viewModel::saveDefaultModelKeys,
                     onSaveAgentModeAuthorization = viewModel::saveAgentModeAuthorization,
+                    onSaveAgentModePerception = viewModel::saveAgentModePerception,
                     onUpdateLanguage = { language ->
                         viewModel.updateAppLanguage(language)
                         AetherLocaleManager.apply(language)

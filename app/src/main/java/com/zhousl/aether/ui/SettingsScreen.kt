@@ -141,6 +141,7 @@ import com.zhousl.aether.data.AetherAppExtensionError
 import com.zhousl.aether.data.AgentModeAuthorizationIssue
 import com.zhousl.aether.data.AgentModeAuthorizationMethod
 import com.zhousl.aether.data.AgentModeAuthorizationState
+import com.zhousl.aether.data.AgentModePerception
 import com.zhousl.aether.data.AgentModeDisplayState
 import com.zhousl.aether.data.AgentWorkspaceMode
 import com.zhousl.aether.data.AutomaticModelPurpose
@@ -416,6 +417,7 @@ fun SettingsScreen(
     agentModeAuthorizationEnabled: Boolean,
     agentModeAuthorizationMethod: AgentModeAuthorizationMethod,
     agentModeAuthorizationState: AgentModeAuthorizationState,
+    agentModePerception: AgentModePerception,
     rootSetupState: RootSetupState,
     rootSetupProgressReturnPage: RootSetupProgressReturnPage?,
     language: AppLanguage,
@@ -463,6 +465,7 @@ fun SettingsScreen(
     ) -> Unit,
     onSaveDefaultModelKeys: (String, String, String, String) -> Unit,
     onSaveAgentModeAuthorization: (Boolean, AgentModeAuthorizationMethod) -> Unit,
+    onSaveAgentModePerception: (AgentModePerception) -> Unit,
     onUpdateLanguage: (AppLanguage) -> Unit,
     onUpdateThemeMode: (AppThemeMode) -> Unit,
     onUpsertProviderConfig: (LlmProviderConfig) -> Unit,
@@ -562,6 +565,9 @@ fun SettingsScreen(
     }
     var agentModeAuthorizationMethodValue by rememberSaveable {
         mutableStateOf(agentModeAuthorizationMethod)
+    }
+    var agentModePerceptionValue by rememberSaveable {
+        mutableStateOf(agentModePerception)
     }
     var languageValue by rememberSaveable {
         mutableStateOf(language)
@@ -1237,6 +1243,7 @@ fun SettingsScreen(
                 agentModeAuthorizationEnabled = agentModeAuthorizationEnabledValue,
                 agentModeAuthorizationMethod = agentModeAuthorizationMethodValue,
                 agentModeAuthorizationState = agentModeAuthorizationState,
+                agentModePerception = agentModePerceptionValue,
                 rootSetupState = rootSetupState,
                 onAgentModeAuthorizationEnabledChanged = {
                     agentModeAuthorizationEnabledValue = it
@@ -1245,6 +1252,10 @@ fun SettingsScreen(
                 onAgentModeAuthorizationMethodChanged = {
                     agentModeAuthorizationMethodValue = it
                     onSaveAgentModeAuthorization(agentModeAuthorizationEnabledValue, it)
+                },
+                onAgentModePerceptionChanged = {
+                    agentModePerceptionValue = it
+                    onSaveAgentModePerception(it)
                 },
                 agentModeDisplayState = agentModeDisplayState,
                 onRequestShizukuPermission = onRequestShizukuPermission,
@@ -5794,9 +5805,11 @@ private fun AgentModeSettingsPage(
     agentModeAuthorizationEnabled: Boolean,
     agentModeAuthorizationMethod: AgentModeAuthorizationMethod,
     agentModeAuthorizationState: AgentModeAuthorizationState,
+    agentModePerception: AgentModePerception,
     rootSetupState: RootSetupState,
     onAgentModeAuthorizationEnabledChanged: (Boolean) -> Unit,
     onAgentModeAuthorizationMethodChanged: (AgentModeAuthorizationMethod) -> Unit,
+    onAgentModePerceptionChanged: (AgentModePerception) -> Unit,
     agentModeDisplayState: AgentModeDisplayState,
     onRequestShizukuPermission: () -> Unit,
     onRefreshAgentModeAuthorization: (Boolean, AgentModeAuthorizationMethod) -> Unit,
@@ -5944,6 +5957,41 @@ private fun AgentModeSettingsPage(
                 Spacer(Modifier.height(8.dp))
                 Text(
                     text = stringResource(R.string.settings_agent_mode_method_description),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AetherOnSurfaceVariant,
+                )
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = stringResource(R.string.settings_agent_mode_perception),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = AetherOnSurface,
+                )
+                Spacer(Modifier.height(8.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SettingsChoiceRow(
+                        title = stringResource(
+                            R.string.settings_agent_mode_perception_elements_with_screenshot,
+                        ),
+                        subtitle = stringResource(
+                            R.string.settings_agent_mode_perception_elements_with_screenshot_subtitle,
+                        ),
+                        selected = agentModePerception == AgentModePerception.ElementsWithScreenshot,
+                        onClick = {
+                            onAgentModePerceptionChanged(AgentModePerception.ElementsWithScreenshot)
+                        },
+                    )
+                    SettingsChoiceRow(
+                        title = stringResource(R.string.settings_agent_mode_perception_elements),
+                        subtitle = stringResource(
+                            R.string.settings_agent_mode_perception_elements_subtitle,
+                        ),
+                        selected = agentModePerception == AgentModePerception.Elements,
+                        onClick = { onAgentModePerceptionChanged(AgentModePerception.Elements) },
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = stringResource(R.string.settings_agent_mode_perception_description),
                     style = MaterialTheme.typography.bodySmall,
                     color = AetherOnSurfaceVariant,
                 )

@@ -53,6 +53,28 @@ class AetherToolExecutorTest {
     }
 
     @Test
+    fun agentDisplayAdvertisesTheElementActionsWithinASizeBudget() {
+        val definitions = AetherToolExecutor.hostToolDefinitions(agentModeEnabled = true)
+        val definition = (0 until definitions.length())
+            .map { definitions.getJSONObject(it) }
+            .first { it.getString("name") == "agent_display" }
+        val actionProperty = definition.getJSONObject("parameters")
+            .getJSONObject("properties")
+            .getJSONObject("action")
+        val advertisedActions = actionProperty.getString("description")
+
+        listOf("observe", "tap", "long_press", "text", "scroll", "wait", "batch", "screenshot").forEach { action ->
+            assertTrue("action '$action' should be advertised", advertisedActions.contains(action))
+        }
+        // The definition travels with every model request inside a turn, so its size is part of the
+        // contract rather than a style question: a new action must not be paid for on every step.
+        assertTrue(
+            "agent_display definition grew to ${definition.toString().length} characters",
+            definition.toString().length < 4_000,
+        )
+    }
+
+    @Test
     fun inferToolOutputOkHonorsAetherJsonFlags() {
         assertTrue(AetherToolExecutor.inferToolOutputOk("""{"ok":true}"""))
         assertFalse(AetherToolExecutor.inferToolOutputOk("""{"ok":false}"""))

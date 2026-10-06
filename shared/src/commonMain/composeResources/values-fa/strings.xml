@@ -246,6 +246,13 @@
     <string name="settings_agent_mode_method_shizuku_subtitle">از یک سرویس شیزوکو بالا استفاده می کند.</string>
     <string name="settings_agent_mode_method_root_subtitle">از پوسته ریشه برای ورودی ممتاز استفاده می کند.</string>
     <string name="settings_agent_mode_method_description">حالت Shizuku نمایشگر را از سرویس کاربر Shizuku ایجاد می کند تا برنامه ها بتوانند از صفحه اصلی نمایش داده شوند. حالت ریشه آزمایشی باقی می ماند.</string>
+    <string name="settings_agent_mode_perception">ادراک رابط</string>
+    <string name="settings_agent_mode_perception_description">انتخاب می کند که پس از هر عمل چه چیزی به مدل نشان داده شود. عناصر رابط متن و مرز دقیق هر کنترل را همراه دارند، بنابراین ضربه زدن به آن‌ها به خواندن مختصات از یک تصویر کوچک‌شده وابسته نیست.</string>
+    <string name="settings_agent_mode_perception_elements_with_screenshot">عناصر + تصویر</string>
+    <string name="settings_agent_mode_perception_elements_with_screenshot_subtitle">ابتدا عناصر رابط خوانده می شوند؛ اگر روی این دستگاه خوانده نشوند، دلیل آن گفته می شود و به تصویر بازمی گردد.</string>
+    <string name="settings_agent_mode_perception_elements">فقط عناصر</string>
+    <string name="settings_agent_mode_perception_elements_subtitle">فقط عناصر رابط خوانده می شوند. تصویر تنها زمانی گرفته می شود که مدل درخواست کند.</string>
+
     <string name="settings_virtual_display">نمایش مجازی</string>
     <string name="settings_agent_mode_display_active">نمایش %1$s در %2$d x %3$d فعال است.</string>
     <string name="settings_agent_mode_no_virtual_display">هیچ نمایش مجازی Agent Mode فعال نیست.</string>
@@ -760,6 +767,16 @@
     <string name="tool_title_typed_agent_mode">در حالت عامل تایپ شده است</string>
     <string name="tool_title_capturing_agent_mode_display">گرفتن نمایشگر حالت عامل</string>
     <string name="tool_title_captured_agent_mode_display">صفحه نمایش حالت عامل ضبط شده</string>
+    <string name="tool_title_reading_agent_mode_elements">در حال خواندن عناصر رابط</string>
+    <string name="tool_title_read_agent_mode_elements">عناصر رابط خوانده شد</string>
+    <string name="tool_title_long_pressing_agent_mode_display">فشار طولانی روی نمایش حالت عامل</string>
+    <string name="tool_title_long_pressed_agent_mode_display">فشار طولانی روی نمایش حالت عامل انجام شد</string>
+    <string name="tool_title_scrolling_agent_mode_display">در حال پیمایش نمایش حالت عامل</string>
+    <string name="tool_title_scrolled_agent_mode_display">نمایش حالت عامل پیمایش شد</string>
+    <string name="tool_title_waiting_agent_mode">در حال انتظار برای نمایش حالت عامل</string>
+    <string name="tool_title_waited_agent_mode">انتظار برای نمایش حالت عامل انجام شد</string>
+    <string name="tool_title_running_agent_mode_steps">در حال اجرای مراحل حالت عامل</string>
+    <string name="tool_title_ran_agent_mode_steps">مراحل حالت عامل اجرا شد</string>
     <string name="tool_title_using_agent_mode_display">استفاده از نمایشگر حالت عامل</string>
     <string name="tool_title_used_agent_mode_display">نمایشگر حالت عامل استفاده شده</string>
     <string name="tool_title_starting_chrome">راه اندازی کروم</string>

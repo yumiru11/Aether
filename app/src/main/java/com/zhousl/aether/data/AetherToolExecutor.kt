@@ -223,10 +223,12 @@ private fun agentModeToolDefinition(): JSONObject = JSONObject().apply {
     put("name", "agent_display")
     put(
         "description",
-        "Operate Aether Agent Mode on an isolated Android virtual display. Use this only when Agent Mode is selected in the chat composer. " +
-            "tap/swipe coordinates are normalized 0..1000 on each axis, independent of resolution; values above 1000 are rejected. " +
-            "Results report width/height (display pixels), image_width/image_height (screenshot pixels), " +
-            "cursor_norm_x/cursor_norm_y (last touch point, normalized) and cursor_x/cursor_y (the same point in display pixels).",
+        "Operate Aether Agent Mode on an isolated Android virtual display. " +
+            "Perceive with observe (one text line per element: id, class, flags, bounds, label), then act by target=<id>; " +
+            "x/y/x1/y1/x2/y2 are normalized 0..1000 per axis, never pixels (value = pixel / extent * 1000; >1000 is rejected), " +
+            "for screens the element list cannot describe. A screenshot is attached only when screenshot=true. " +
+            "Results carry effect (changed/unchanged/unknown), settle_ms, and hit for a coordinate gesture. " +
+            "A result that names a reason is telling you what to change; repeating the same call unchanged fails the same way.",
     )
     put(
         "parameters",
@@ -235,31 +237,71 @@ private fun agentModeToolDefinition(): JSONObject = JSONObject().apply {
             put(
                 "properties",
                 JSONObject().apply {
-                    put("action", stringProperty("One of: list_apps, start, status, launch, tap, swipe, key, text, screenshot, stop."))
-                    put("query", stringProperty("For list_apps: optional app label, package, or activity filter."))
-                    put("include_system", booleanProperty("For list_apps: whether to include system apps."))
-                    put("max_results", integerProperty("For list_apps: maximum number of apps to return."))
-                    put("target", stringProperty("For launch: package name or exact app label."))
+                    put(
+                        "action",
+                        stringProperty(
+                            "One of: observe, tap, long_press, swipe, scroll, key, text, wait, batch, screenshot, " +
+                                "launch, list_apps, start, status, stop.",
+                        ),
+                    )
+                    put(
+                        "target",
+                        stringProperty(
+                            "Element id from observe, for tap/long_press/text/scroll. launch: app label or package.",
+                        ),
+                    )
+                    put("query", stringProperty("observe and list_apps: text filter. wait and scroll use until instead."))
+                    put("include_system", booleanProperty("list_apps: include system apps."))
+                    put("max_results", integerProperty("list_apps: maximum number of apps to return."))
+                    put("max_elements", integerProperty("observe: maximum number of elements to return (default 60)."))
                     listOf("x", "y", "x1", "y1", "x2", "y2").forEach { key ->
-                        val axis = if (key.startsWith("x")) "width" else "height"
-                        put(
-                            key,
-                            integerProperty(
-                                "For ${if (key.length == 1) "tap" else "swipe"}: normalized $axis coordinate in 0..1000 " +
-                                    "(0 = left/top edge, 1000 = right/bottom edge), NOT screenshot or display pixels. " +
-                                    "Convert a screenshot pixel with pixel / image_$axis * 1000.",
-                            ),
-                        )
+                        val role = if (key.length == 1) "tap/long_press" else "swipe"
+                        val axisName = if (key.startsWith("x")) "x" else "y"
+                        put(key, integerProperty(role + ": normalized " + axisName + " in 0..1000 (see description)."))
                     }
-                    put("duration_ms", integerProperty("For swipe: gesture duration in milliseconds (50..10000)."))
-                    put("key", stringProperty("For key: Android key code name or number."))
+                    put("duration_ms", integerProperty("swipe: gesture duration (50..10000). long_press: hold duration."))
+                    put(
+                        "via",
+                        stringProperty(
+                            "tap and long_press: touch (default, a real finger touch) or action (the element's own click action).",
+                        ),
+                    )
+                    put("key", stringProperty("key: Android key code name or number."))
                     put(
                         "text",
                         stringProperty(
-                            "For text: text to insert into the focused field; any Unicode (Chinese, emoji, ...) is supported. " +
-                                "Tap the field first and confirm it is focused. Fails if no window on the display has input focus.",
+                            "text: what to write into the field. Any Unicode; the field is read back, so the result says " +
+                                "whether the write matched.",
                         ),
                     )
+                    put("submit", booleanProperty("text: press Enter once the write is confirmed."))
+                    put("direction", stringProperty("scroll: up, down, left or right."))
+                    put(
+                        "until",
+                        stringProperty("scroll: scroll until this text appears. wait: 'text:<s>' or 'gone:<s>'."),
+                    )
+                    put("timeout_ms", integerProperty("wait: how long to keep checking, in milliseconds."))
+                    put(
+                        "region",
+                        stringProperty(
+                            "observe: \"l,t,r,b\" display pixels, to restrict the read. screenshot: the crop to capture; a crop " +
+                                "is delivered 1:1 with its origin and scale.",
+                        ),
+                    )
+                    put(
+                        "screenshot",
+                        booleanProperty(
+                            "Attach a screenshot to this result. Default false.",
+                        ),
+                    )
+                    put(
+                        "steps",
+                        arrayProperty(
+                            "batch: ordered step objects, each shaped like a normal agent_display call.",
+                        ),
+                    )
+                    put("stop_on_error", booleanProperty("batch: stop at the first failing step. Default true."))
+                    put("report", stringProperty("batch: final (default, returns the last observation), each, or none."))
                 },
             )
             put("required", JSONArray().put("action"))
@@ -276,6 +318,16 @@ private fun stringProperty(description: String): JSONObject = JSONObject()
 private fun integerProperty(description: String): JSONObject = JSONObject()
     .put("type", "integer")
     .put("description", description)
+
+/**
+ * Batch steps are described by shape rather than expanded here. Repeating every parameter of every
+ * action inside the step schema would double the size of a definition that is sent with every model
+ * request, for information the description already carries.
+ */
+private fun arrayProperty(description: String): JSONObject = JSONObject()
+    .put("type", "array")
+    .put("description", description)
+    .put("items", JSONObject().put("type", "object"))
 
 private fun booleanProperty(description: String): JSONObject = JSONObject()
     .put("type", "boolean")
