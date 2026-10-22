@@ -331,7 +331,9 @@ class AetherAppRuntime(
 
     private suspend fun startScheduledTaskFromAlarm(task: ScheduledTask): Boolean {
         return try {
-            if (settingsRepository.settings.first().keepTasksRunningInBackground) {
+            val settings = settingsRepository.settings.first()
+            // Phone Use runs control the screen and may outlive the alarm window.
+            if (settings.keepTasksRunningInBackground || task.phoneUseEnabled) {
                 runCatching {
                     AetherForegroundService.ensureRunning(application)
                 }.onFailure { throwable ->

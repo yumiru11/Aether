@@ -5,6 +5,7 @@ import java.time.ZoneId
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -134,6 +135,36 @@ class ScheduledTaskModelsTest {
         ).single()
 
         assertEquals(millis("2026-05-16T20:30:00"), refreshed.nextRunAtMillis)
+    }
+
+    @Test
+    fun phoneUsePreferenceSurvivesStorageRoundTrip() {
+        val task = ScheduledTask(
+            id = "phone-use",
+            name = "Phone Use",
+            prompt = "Open Settings",
+            schedule = ScheduledTaskSchedule.Daily(timesMinutesOfDay = listOf(9 * 60)),
+            phoneUseEnabled = true,
+        )
+
+        val parsed = parseScheduledTasks(serializeScheduledTasks(listOf(task))).single()
+
+        assertTrue(parsed.phoneUseEnabled)
+        assertTrue(parsed.toPublicJson().optBoolean("phoneUseEnabled"))
+    }
+
+    @Test
+    fun storedTasksWithoutPhoneUsePreferenceDefaultToDisabled() {
+        val legacyJson = ScheduledTask(
+            id = "legacy",
+            name = "Legacy",
+            prompt = "Run",
+            schedule = ScheduledTaskSchedule.Daily(timesMinutesOfDay = listOf(9 * 60)),
+        ).toStorageJson().apply { remove("phoneUseEnabled") }
+
+        val parsed = parseScheduledTasks(JSONArray().put(legacyJson).toString()).single()
+
+        assertFalse(parsed.phoneUseEnabled)
     }
 
     private fun millis(value: String): Long =

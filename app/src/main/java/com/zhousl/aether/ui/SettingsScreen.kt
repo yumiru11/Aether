@@ -483,7 +483,7 @@ fun SettingsScreen(
     onImportPiExtension: () -> Unit,
     onAllowNativeModsOnNextStart: () -> Unit,
     onDisableNativeModsOnNextStart: () -> Unit,
-    onSaveScheduledTask: (String?, String, String, ScheduledTaskSchedule, Boolean) -> Unit,
+    onSaveScheduledTask: (String?, String, String, ScheduledTaskSchedule, Boolean, Boolean) -> Unit,
     onToggleScheduledTaskEnabled: (String, Boolean) -> Unit,
     onRemoveScheduledTask: (String) -> Unit,
     onRequestTermuxPermission: () -> Unit,
@@ -1084,8 +1084,8 @@ fun SettingsScreen(
 
             SettingsPage.AddScheduledTask -> ScheduledTaskEditPage(
                 existingTask = null,
-                onSave = { name, prompt, schedule, enabled ->
-                    onSaveScheduledTask(null, name, prompt, schedule, enabled)
+                onSave = { name, prompt, schedule, enabled, phoneUseEnabled ->
+                    onSaveScheduledTask(null, name, prompt, schedule, enabled, phoneUseEnabled)
                     currentPage = SettingsPage.ScheduledTasks.name
                 },
                 onBack = { currentPage = SettingsPage.ScheduledTasks.name },
@@ -1093,8 +1093,8 @@ fun SettingsScreen(
 
             SettingsPage.EditScheduledTask -> ScheduledTaskEditPage(
                 existingTask = scheduledTasks.firstOrNull { it.id == editingScheduledTaskId },
-                onSave = { name, prompt, schedule, enabled ->
-                    onSaveScheduledTask(editingScheduledTaskId, name, prompt, schedule, enabled)
+                onSave = { name, prompt, schedule, enabled, phoneUseEnabled ->
+                    onSaveScheduledTask(editingScheduledTaskId, name, prompt, schedule, enabled, phoneUseEnabled)
                     currentPage = SettingsPage.ScheduledTasks.name
                 },
                 onBack = { currentPage = SettingsPage.ScheduledTasks.name },
@@ -5047,6 +5047,13 @@ private fun ScheduledTaskCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = AetherOnSurfaceVariant,
                 )
+                if (task.phoneUseEnabled) {
+                    Text(
+                        text = stringResource(R.string.settings_scheduled_task_phone_use),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AetherPrimary,
+                    )
+                }
             }
             Switch(
                 checked = task.isEnabled,
@@ -5059,7 +5066,7 @@ private fun ScheduledTaskCard(
 @Composable
 private fun ScheduledTaskEditPage(
     existingTask: ScheduledTask?,
-    onSave: (String, String, ScheduledTaskSchedule, Boolean) -> Unit,
+    onSave: (String, String, ScheduledTaskSchedule, Boolean, Boolean) -> Unit,
     onBack: () -> Unit,
 ) {
     val existingInterval = existingTask?.schedule as? ScheduledTaskSchedule.Interval
@@ -5073,6 +5080,9 @@ private fun ScheduledTaskEditPage(
     }
     var enabledValue by rememberSaveable(existingTask?.id) {
         mutableStateOf(existingTask?.isEnabled ?: true)
+    }
+    var phoneUseEnabledValue by rememberSaveable(existingTask?.id) {
+        mutableStateOf(existingTask?.phoneUseEnabled ?: false)
     }
     var scheduleMode by rememberSaveable(existingTask?.id) {
         mutableIntStateOf(
@@ -5129,7 +5139,7 @@ private fun ScheduledTaskEditPage(
         trailingEnabled = nameValue.text.isNotBlank() && promptValue.text.isNotBlank(),
         onTrailingAction = {
             buildSchedule()?.let { schedule ->
-                onSave(nameValue.text, promptValue.text, schedule, enabledValue)
+                onSave(nameValue.text, promptValue.text, schedule, enabledValue, phoneUseEnabledValue)
             }
         },
     ) {
@@ -5158,6 +5168,13 @@ private fun ScheduledTaskEditPage(
                     subtitle = stringResource(R.string.settings_disabled_tasks_saved_subtitle),
                     checked = enabledValue,
                     onCheckedChange = { enabledValue = it },
+                )
+                CardDivider()
+                SettingsToggleRow(
+                    title = stringResource(R.string.settings_scheduled_task_phone_use),
+                    subtitle = stringResource(R.string.settings_scheduled_task_phone_use_subtitle),
+                    checked = phoneUseEnabledValue,
+                    onCheckedChange = { phoneUseEnabledValue = it },
                 )
             }
         }

@@ -3182,6 +3182,7 @@ class AetherViewModel(
         prompt: String,
         schedule: ScheduledTaskSchedule,
         enabled: Boolean,
+        phoneUseEnabled: Boolean,
     ) {
         viewModelScope.launch {
             val existing = existingTaskId
@@ -3197,6 +3198,7 @@ class AetherViewModel(
                 prompt = prompt.trim(),
                 schedule = schedule,
                 isEnabled = enabled,
+                phoneUseEnabled = phoneUseEnabled,
             )
             if (task.prompt.isBlank()) {
                 emitTransientMessage(uiString(R.string.message_scheduled_task_prompt_required))

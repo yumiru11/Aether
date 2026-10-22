@@ -460,7 +460,10 @@ class SessionExecutionManager(
                 val baseMessages = existing.messages.ifEmpty {
                     persistedSessionWithMessages?.messages.orEmpty()
                 }
-                existing.withDerivedMessages(baseMessages + userMessage)
+                // The task owns Phone Use for its chat so queued follow-ups inherit it.
+                existing.withDerivedMessages(baseMessages + userMessage).copy(
+                    agentModeEnabled = task.phoneUseEnabled,
+                )
             } else {
                 ChatSession(
                     id = sessionId,
@@ -469,6 +472,7 @@ class SessionExecutionManager(
                     hasCustomTitle = true,
                     messages = listOf(userMessage),
                     selectedModelKey = resolveDefaultChatModelKey(settings, providerConfigs),
+                    agentModeEnabled = task.phoneUseEnabled,
                 )
             }
             selectedModelKey = updatedSession.selectedModelKey
