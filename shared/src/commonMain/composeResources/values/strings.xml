@@ -448,6 +448,8 @@
     <string name="settings_prompt">Prompt</string>
     <string name="settings_enabled">Enabled</string>
     <string name="settings_disabled_tasks_saved_subtitle">Disabled tasks stay saved but do not wake Aether.</string>
+    <string name="settings_scheduled_task_phone_use">Phone Use</string>
+    <string name="settings_scheduled_task_phone_use_subtitle">Run this task with Phone Use (Android Accessibility device control). Requires Phone Use to be enabled in Settings.</string>
     <string name="settings_schedule_interval">Interval</string>
     <string name="settings_schedule_daily">Daily</string>
     <string name="settings_schedule_weekly">Weekly</string>

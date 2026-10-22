@@ -71,6 +71,7 @@ data class ScheduledTask(
     val prompt: String,
     val schedule: ScheduledTaskSchedule,
     val isEnabled: Boolean = true,
+    val phoneUseEnabled: Boolean = false,
     val sessionId: String = "",
     val createdBy: ScheduledTaskCreator = ScheduledTaskCreator.User,
     val createdAtMillis: Long = System.currentTimeMillis(),
@@ -117,6 +118,7 @@ fun ScheduledTask.toStorageJson(): JSONObject = JSONObject().apply {
     put("prompt", prompt)
     put("schedule", schedule.toJson())
     put("isEnabled", isEnabled)
+    put("phoneUseEnabled", phoneUseEnabled)
     put("sessionId", sessionId)
     put("createdBy", createdBy.storageValue)
     put("createdAtMillis", createdAtMillis)
@@ -223,6 +225,7 @@ private fun parseScheduledTask(json: JSONObject): ScheduledTask? {
         prompt = json.optString("prompt"),
         schedule = schedule,
         isEnabled = json.optBoolean("isEnabled", true),
+        phoneUseEnabled = json.optBoolean("phoneUseEnabled", false),
         sessionId = json.optString("sessionId"),
         createdBy = ScheduledTaskCreator.fromStorage(json.optString("createdBy")),
         createdAtMillis = json.optLong("createdAtMillis", now),

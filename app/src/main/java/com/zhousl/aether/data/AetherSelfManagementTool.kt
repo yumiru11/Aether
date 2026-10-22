@@ -169,7 +169,7 @@ class AetherSelfManagementTool(
         ),
         buildAetherToolDefinition(
             name = "aether_scheduled_task_manage",
-            description = "List, create, update, enable, disable, or remove Aether scheduled tasks. Scheduled tasks wake Aether at the next matching time and run the prompt as an automated Agent turn.",
+            description = "List, create, update, enable, disable, or remove Aether scheduled tasks. Scheduled tasks wake Aether at the next matching time and run the prompt as an automated Agent turn. Set phone_use to run the task with Phone Use.",
             properties = JSONObject().apply {
                 put(
                     "action",
@@ -183,6 +183,16 @@ class AetherSelfManagementTool(
                 put("prompt", JSONObject().apply { put("type", "string") })
                 put("session_id", JSONObject().apply { put("type", "string") })
                 put("enabled", JSONObject().apply { put("type", "boolean") })
+                put(
+                    "phone_use",
+                    JSONObject().apply {
+                        put("type", "boolean")
+                        put(
+                            "description",
+                            "Run the task with Phone Use (Android device control). Omit to keep the existing value; defaults to false for new tasks.",
+                        )
+                    },
+                )
                 put(
                     "schedule",
                     JSONObject().apply {
@@ -583,6 +593,7 @@ class AetherSelfManagementTool(
                         prompt = prompt,
                         schedule = schedule,
                         isEnabled = arguments.optNullableBoolean("enabled") ?: true,
+                        phoneUseEnabled = arguments.optNullableBooleanAny("phone_use", "phoneUseEnabled") ?: false,
                         sessionId = optAetherString(arguments, "session_id", "sessionId"),
                         createdBy = ScheduledTaskCreator.Agent,
                     )
@@ -610,6 +621,8 @@ class AetherSelfManagementTool(
                         prompt = arguments.optString("prompt").trim().ifBlank { existing.prompt },
                         schedule = schedule,
                         isEnabled = enabled,
+                        phoneUseEnabled = arguments.optNullableBooleanAny("phone_use", "phoneUseEnabled")
+                            ?: existing.phoneUseEnabled,
                         sessionId = optAetherString(arguments, "session_id", "sessionId").ifBlank { existing.sessionId },
                     )
                 )
@@ -1083,6 +1096,9 @@ class AetherSelfManagementTool(
 
     private fun JSONObject.optNullableBoolean(name: String): Boolean? =
         if (has(name)) optBoolean(name) else null
+
+    private fun JSONObject.optNullableBooleanAny(vararg names: String): Boolean? =
+        names.firstOrNull(::has)?.let { optBoolean(it) }
 
     private fun JSONObject.optNullableLong(name: String): Long? =
         if (has(name)) optLong(name) else null

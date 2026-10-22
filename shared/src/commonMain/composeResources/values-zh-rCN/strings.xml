@@ -446,6 +446,8 @@
     <string name="settings_prompt">提示词</string>
     <string name="settings_enabled">启用</string>
     <string name="settings_disabled_tasks_saved_subtitle">关闭后任务仍会保存，但不会唤起 Aether。</string>
+    <string name="settings_scheduled_task_phone_use">Phone Use</string>
+    <string name="settings_scheduled_task_phone_use_subtitle">运行该任务时启用 Phone Use（Android 无障碍设备控制）。需在设置中开启 Phone Use。</string>
     <string name="settings_schedule_interval">间隔</string>
     <string name="settings_schedule_daily">每天</string>
     <string name="settings_schedule_weekly">每周</string>
