@@ -23,3 +23,5 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Temporary marker to trigger the PR Check debug build; removed with this branch.
